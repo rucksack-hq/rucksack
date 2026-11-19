@@ -1,0 +1,10 @@
+{
+  "name": "skillnet",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Share agent skills (SKILL.md folders) privately, with friends, organizations or everyone, synced live to every machine.",
+  "bin": { "skillnet": "cli/skillnet.js" },
+  "engines": { "node": ">=22.5" },
+  "scripts": { "start": "node server.js", "test": "node --test test/" }
+}
