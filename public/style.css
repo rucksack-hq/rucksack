@@ -69,3 +69,22 @@ th { color: var(--muted); }
 @media (prefers-reduced-motion: reduce) { #toast, #main { transition: none; } }
 code.grow { overflow-wrap: anywhere; }
 @media (max-width: 560px) { .row > .grow { flex-basis: 100%; } }
+a.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+textarea.code { border: 1px solid var(--line); background: var(--card); padding: 10px; font: 13px/1.5 var(--mono); min-height: 240px; field-sizing: content; max-height: 70vh; }
+.stack-gap { display: grid; gap: 8px; }
+form.stack.wide { max-width: none; }
+.notice { border-color: var(--accent); margin: 12px 0; }
+.snippet { position: relative; }
+.snippet button { position: absolute; top: 6px; right: 6px; padding: 2px 8px; font-size: 13px; }
+.snippet pre { padding-right: 64px; margin: 8px 0; }
+.seg.wrap { flex-wrap: wrap; display: flex; gap: 6px; border: 0; overflow: visible; margin-bottom: 16px; }
+.seg.wrap button, .seg.wrap button:last-child { border: 1px solid var(--line); border-radius: var(--r); }
+.seg.wrap button.on { border-color: var(--accent); }
+.stack-gap > *, main > * { min-width: 0; }
+.snippet pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.notice code { overflow-wrap: anywhere; }
+form.inline.wrap { flex-wrap: wrap; align-items: center; }
+label.check { display: flex; gap: 6px; align-items: center; margin: 0; color: var(--ink); white-space: nowrap; }
+label.check input { width: auto; }
+details summary { cursor: pointer; color: var(--muted); margin-top: 8px; }
+[hidden] { display: none !important; }

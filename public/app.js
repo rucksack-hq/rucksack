@@ -2,6 +2,7 @@
 const $main = document.getElementById('main');
 let me = null;
 
+const fill = (...kids) => $main.replaceChildren(...kids.flat(Infinity).filter((k) => k != null && k !== false && k !== 0));
 function h(tag, attrs = {}, ...kids) {
   const el = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs || {})) {
@@ -39,9 +40,19 @@ const act = (fn) => async (e) => {
 };
 const when = (t) => (t ? new Date(t).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : 'never');
 const VIS_LABEL = { private: 'Only me', friends: 'Friends', org: 'Organization', public: 'Everyone' };
+const ROLE_HELP = {
+  owner: 'Everything, including roles',
+  admin: 'Decides who gets skills, manages people',
+  editor: 'Changes what skills say',
+  member: 'Uses skills, suggests changes',
+};
+const b64 = (text) => btoa(String.fromCharCode(...new TextEncoder().encode(text)));
+const unb64 = (data) => new TextDecoder().decode(Uint8Array.from(atob(data), (c) => c.charCodeAt(0)));
+const copyBtn = (text, label = 'Copy') => h('button', { type: 'button', onclick: act(async () => { await navigator.clipboard.writeText(typeof text === 'function' ? text() : text); toast('Copied'); }) }, label);
+const editor = (value, label) => { const t = h('textarea', { class: 'code', 'aria-label': label, spellcheck: 'false' }); t.value = value; return t; };
 
 function nav() {
-  const links = me ? [['/', 'My skills'], ['/browse', 'Browse'], ['/friends', 'Friends'], ['/orgs', 'Organizations'], ['/devices', 'Devices']] : [];
+  const links = me ? [['/', 'My skills'], ['/browse', 'Browse'], ['/connect', 'Connect'], ['/friends', 'Friends'], ['/orgs', 'Organizations'], ['/devices', 'Keys']] : [];
   const path = location.pathname;
   document.getElementById('nav').replaceChildren(
     ...links.map(([href, label]) => h('a', { href, class: (href === '/' ? path === '/' : path.startsWith(href)) ? 'on' : null }, label)),
@@ -57,6 +68,7 @@ function skillRow(s, { onChange } = {}) {
     ),
     h('span', { class: 'tag' }, VIS_LABEL[s.visibility]),
     s.required && h('span', { class: 'tag req' }, 'Required'),
+    s.open_proposals > 0 && h('a', { class: 'tag req', href: `/s/${s.id}#suggestions` }, `${s.open_proposals} suggested`),
     installButton(s, onChange),
   );
 }
@@ -91,6 +103,21 @@ function askBox({ placeholder, value = '', onsend }) {
     h('button', { type: 'button', class: 'send', 'aria-label': 'Search', onclick: () => onsend(ta.value.trim()) }, '→')));
 }
 
+function snippet(text) { return h('div', { class: 'snippet' }, h('pre', {}, text), copyBtn(text)); }
+function keyMaker(onMade, label = '') {
+  const err = h('div', { class: 'err' });
+  return h('form', { class: 'inline wrap', onsubmit: act(async (e) => {
+    const f = Object.fromEntries(new FormData(e.target));
+    try {
+      const r = await api('POST', '/api/keys', { label: f.label, scope: f.write ? 'write' : 'read' });
+      onMade(r.key);
+      if (!label) { await navigator.clipboard.writeText(r.key).catch(() => {}); alert(`Your new key (copied):\n\n${r.key}\n\nIt is not shown again.`); }
+    } catch (x) { err.textContent = x.message; }
+  }) }, h('input', { name: 'label', placeholder: 'Key name, like “Cursor cloud”', 'aria-label': 'Key name', value: label || null, required: true }),
+    h('label', { class: 'check' }, h('input', { type: 'checkbox', name: 'write' }), 'Can publish'),
+    h('button', { class: 'primary' }, 'Make key'), err);
+}
+
 const pages = {
   async signin() {
     const next = new URLSearchParams(location.search).get('next') || '/';
@@ -108,7 +135,7 @@ const pages = {
         h('label', { for: 'f-email' }, 'Email'), h('input', { id: 'f-email', name: 'email', type: 'email', required: true, autocomplete: 'email' }),
         h('label', { for: 'f-pw' }, 'Password'), h('input', { id: 'f-pw', name: 'password', type: 'password', required: true, minlength: 8, autocomplete: up ? 'new-password' : 'current-password' }),
         h('button', { class: 'primary' }, up ? 'Create account' : 'Sign in'), err);
-      $main.replaceChildren(
+      fill(
         h('h1', {}, up ? 'Create your Skillnet account' : 'Sign in to Skillnet'),
         h('p', { class: 'lead' }, 'Share agent skills with friends and your organization. They sync to Claude Code, Pi, Codex and other agents on every machine you use.'),
         form,
@@ -119,21 +146,40 @@ const pages = {
   },
 
   async home() {
-    const [{ skills }, mine] = await Promise.all([api('GET', '/api/manifest'), api('GET', '/api/skills')]);
+    const [{ skills }, mine, { proposals }] = await Promise.all([api('GET', '/api/manifest'), api('GET', '/api/skills'), api('GET', '/api/proposals')]);
     const own = mine.skills.filter((s) => s.owner === me.user.handle);
-    const origin = location.origin;
-    $main.replaceChildren(
-      h('h1', {}, 'My skills'),
-      h('p', { class: 'lead' }, 'Everything here is kept in sync on each machine you set up.'),
-      h('div', { class: 'list' }, skills.length ? mine.skills.filter((s) => skills.some((m) => m.id === s.id)).map((s) => skillRow(s)) : h('p', { class: 'muted' }, 'Nothing yet. Add skills from Browse, or publish your own.')),
-      h('h2', {}, 'Set up a machine'),
-      h('p', {}, 'Run this in a terminal (needs Node 22 or newer). It signs the machine in, syncs your skills into each agent, and keeps them updated in the background.'),
-      h('pre', {}, `curl -fsSL ${origin}/install.sh | sh`),
-      h('h2', {}, 'Publish a skill'),
-      h('p', {}, 'From the skill folder (the one with SKILL.md):'),
-      h('pre', {}, `skillnet push . --visibility friends\nskillnet push . --org your-org --required   # push to everyone in an organization`),
+    const mineIds = new Set(skills.map((m) => m.id));
+    const review = proposals.filter((p) => p.can_approve);
+    fill(
+      h('div', { class: 'row' }, h('h1', { class: 'grow' }, 'My skills'), h('a', { class: 'btn primary', href: '/new' }, 'New skill')),
+      h('p', { class: 'lead' }, 'Everything here is kept in sync on each machine and cloud run you connect.'),
+      review.length > 0 && h('div', { class: 'card notice' }, h('strong', {}, `${review.length} suggested ${review.length === 1 ? 'change' : 'changes'} to review: `),
+        review.map((p, i) => [i ? ', ' : '', h('a', { href: `/s/${p.skill_id}#suggestions` }, p.skill)])),
+      h('div', { class: 'list' }, mine.skills.filter((s) => mineIds.has(s.id)).map((s) => skillRow(s)),
+        mineIds.size <= 1 && h('p', { class: 'muted' }, 'Nothing yet. Add skills from Browse, or make a new one.')),
+      h('p', { class: 'muted' }, 'Every machine also gets the skillnet skill, so you can ask your agent things like “which skills does Acme require?” or “suggest a fix to acme/handbook”.'),
+      skills.length <= 1 && h('p', {}, h('a', { href: '/connect' }, 'Connect your first agent')),
       own.length > 0 && [h('h2', {}, 'Published by you'), h('div', { class: 'list' }, own.map((s) => skillRow(s)))],
     );
+  },
+
+  async new() {
+    const err = h('div', { class: 'err' });
+    const places = [['', 'Me'], ...me.orgs.filter((o) => o.role !== 'member').map((o) => [o.slug, o.name])];
+    const md = editor('---\nname: my-skill\ndescription: Use when ...\n---\n\n# My skill\n\nSteps the agent should follow.\n', 'SKILL.md');
+    fill(h('h1', {}, 'New skill'),
+      h('p', { class: 'lead' }, 'Write the SKILL.md here, or publish a folder with scripts from your terminal: skillnet push ./my-skill.'),
+      h('form', { class: 'stack wide', onsubmit: act(async (e) => {
+        const f = Object.fromEntries(new FormData(e.target));
+        try {
+          const r = await api('POST', '/api/skills/push', { files: { 'SKILL.md': b64(md.value) }, org: f.org || undefined, visibility: f.org ? 'org' : f.visibility, note: 'first version' });
+          toast('Published'); go(`/s/${r.skill.id}`);
+        } catch (x) { err.textContent = x.message; }
+      }) },
+        h('label', { for: 'n-org' }, 'Belongs to'), h('select', { id: 'n-org', name: 'org' }, places.map(([v, l]) => h('option', { value: v }, l))),
+        h('label', { for: 'n-vis' }, 'Who can see it (personal skills)'), h('select', { id: 'n-vis', name: 'visibility' }, ['private', 'friends', 'public'].map((v) => h('option', { value: v }, VIS_LABEL[v]))),
+        h('label', {}, 'SKILL.md (the name line becomes the skill name)'), md,
+        h('button', { class: 'primary' }, 'Publish'), err));
   },
 
   async browse() {
@@ -143,22 +189,48 @@ const pages = {
       const { skills } = await api('GET', `/api/skills?q=${encodeURIComponent(q)}`);
       list.replaceChildren(...(skills.length ? skills.map((s) => skillRow(s, { onChange: load })) : [h('p', { class: 'muted' }, 'No skills match.')]));
     };
-    $main.replaceChildren(h('h1', {}, 'Browse'),
+    fill(h('h1', {}, 'Browse'),
       h('p', { class: 'lead' }, 'Skills you can see: your own, your friends’, your organizations’ and public ones.'),
       askBox({ placeholder: 'Search skills', value: q, onsend: (v) => go(`/browse${v ? `?q=${encodeURIComponent(v)}` : ''}`) }), list);
     await load();
   },
 
   async skill(id) {
-    const d = await api('GET', `/api/skills/${id}`);
+    const [d, { proposals }] = await Promise.all([api('GET', `/api/skills/${id}`), api('GET', `/api/proposals?skill=${id}`)]);
     const s = d.skill, isOrg = s.owner_kind === 'org';
     const patch = (body) => act(async () => { await api('PATCH', `/api/skills/${s.id}`, body); toast('Saved'); render(); });
-    $main.replaceChildren(
+    // Edit or suggest: same box. Editors save a new version; everyone else sends a suggestion to the editors.
+    const box = h('div', { hidden: true, class: 'card stack-gap' });
+    const openBox = act(async () => {
+      const { files } = await api('GET', `/api/skills/${s.id}/bundle`);
+      const md = editor(unb64(files['SKILL.md']), 'SKILL.md'), note = h('input', { placeholder: s.can_edit ? 'What changed (optional)' : 'Why (helps the editor decide)', 'aria-label': 'Note' });
+      const err = h('div', { class: 'err' });
+      box.replaceChildren(h('label', {}, 'SKILL.md'), md, note, h('div', { class: 'row' },
+        h('button', { class: 'primary', onclick: act(async () => {
+          const next = { ...files, 'SKILL.md': b64(md.value) };
+          try {
+            if (s.can_edit) { await api('POST', '/api/skills/push', { org: isOrg ? s.owner : undefined, name: s.name, files: next, note: note.value }); toast('Saved; machines update in seconds'); }
+            else { await api('POST', `/api/skills/${s.id}/proposals`, { files: next, note: note.value }); toast('Sent to the editors'); }
+            render();
+          } catch (x) { err.textContent = x.message; }
+        }) }, s.can_edit ? 'Save new version' : 'Send suggestion'),
+        h('button', { onclick: () => { box.hidden = true; } }, 'Cancel')), err);
+      box.hidden = false; md.focus();
+    });
+    fill(
       h('h1', {}, `${s.owner}/${s.name}`),
       h('p', { class: 'lead' }, s.description || 'No description'),
-      h('div', { class: 'row' }, h('span', { class: 'muted grow' }, `Version ${s.version} · updated ${when(s.updated)}`), installButton(s),
-        s.required && h('span', { class: 'tag req' }, 'Required for everyone in the organization')),
-      s.can_edit && h('div', { class: 'card', style: 'margin-top:16px' },
+      h('div', { class: 'row' }, h('span', { class: 'muted grow' }, `Version ${s.version}, updated ${when(s.updated)}`),
+        s.required && h('span', { class: 'tag req' }, 'Required for the organization'),
+        h('button', { onclick: openBox }, s.can_edit ? 'Edit' : 'Suggest a change'), installButton(s)),
+      box,
+      proposals.length > 0 && [h('h2', { id: 'suggestions' }, 'Suggested changes'), h('div', { class: 'list' }, proposals.map((p) => h('div', { class: 'card' },
+        h('div', { class: 'row' }, h('div', { class: 'grow' }, h('strong', {}, `@${p.author}`), ` ${p.note || '(no note)'}`,
+          h('div', { class: 'muted' }, `${when(p.created)}, based on version ${p.base_version}${p.base_version !== s.version ? `; it is now version ${s.version}, so approving replaces the newer changes` : ''}`)),
+          p.can_approve && h('button', { class: 'primary', onclick: act(async () => { await api('POST', `/api/proposals/${p.id}/approve`); toast('Approved; machines update in seconds'); render(); }) }, 'Approve'),
+          h('button', { onclick: act(async () => { await api('POST', `/api/proposals/${p.id}/decline`); render(); }) }, p.can_approve ? 'Decline' : 'Withdraw')),
+        h('details', {}, h('summary', {}, 'Proposed SKILL.md'), h('pre', {}, p.skill_md)))))],
+      s.can_manage && h('div', { class: 'card', style: 'margin-top:16px' },
         h('label', {}, 'Who can see it'),
         h('div', { class: 'seg' }, (isOrg ? ['org', 'public'] : ['private', 'friends', 'public']).map((v) =>
           h('button', { class: v === s.visibility ? 'on' : null, onclick: patch({ visibility: v }) }, VIS_LABEL[v]))),
@@ -179,6 +251,7 @@ const pages = {
             await api('POST', `/api/skills/${s.id}/rollback`, { version: v.version }); toast(`Back to version ${v.version}`); render();
           }) }, 'Roll back to this'))))),
     );
+    if (location.hash === '#suggestions') document.getElementById('suggestions')?.scrollIntoView();
   },
 
   async friends() {
@@ -186,7 +259,7 @@ const pages = {
     const err = h('div', { class: 'err' });
     const person = (u, ...btns) => h('div', { class: 'card row' }, h('div', { class: 'grow' }, h('strong', {}, u.name), ' ', h('span', { class: 'muted' }, `@${u.handle}`)), ...btns);
     const remove = (u, label) => h('button', { onclick: act(async () => { await api('DELETE', `/api/friends/${u.id}`); render(); }) }, label);
-    $main.replaceChildren(
+    fill(
       h('h1', {}, 'Friends'),
       h('p', { class: 'lead' }, 'Friends can see and add the skills you share with “Friends”.'),
       h('form', { class: 'inline', onsubmit: act(async (e) => {
@@ -206,7 +279,7 @@ const pages = {
   async orgs() {
     me = await api('GET', '/api/me');
     const err = h('div', { class: 'err' });
-    $main.replaceChildren(
+    fill(
       h('h1', {}, 'Organizations'),
       h('p', { class: 'lead' }, 'Admins publish skills for the whole organization. Required ones land on every member’s machines automatically.'),
       h('div', { class: 'list' }, me.orgs.length ? me.orgs.map((o) => h('div', { class: 'card row' }, h('a', { class: 'grow', href: `/o/${o.slug}` }, o.name), h('span', { class: 'tag' }, o.role))) : h('p', { class: 'muted' }, 'You are not in any organization yet.')),
@@ -222,9 +295,9 @@ const pages = {
   async org(slug) {
     const d = await api('GET', `/api/orgs/${slug}`);
     const o = d.org, admin = ['owner', 'admin'].includes(o.role), owner = o.role === 'owner';
-    $main.replaceChildren(
+    fill(
       h('h1', {}, o.name),
-      h('p', { class: 'lead' }, `You are ${o.role === 'admin' ? 'an admin' : `the ${o.role}`.replace('the member', 'a member')}. Publish with `, h('code', {}, `skillnet push . --org ${o.slug} --required`), '.'),
+      h('p', { class: 'lead' }, `You are ${o.role === 'owner' ? 'the owner' : `${o.role === 'admin' || o.role === 'editor' ? 'an' : 'a'} ${o.role}`}: ${ROLE_HELP[o.role].toLowerCase()}.`),
       admin && h('div', { class: 'card' }, h('label', {}, 'Invite link (anyone with it can join)'),
         h('div', { class: 'row' }, h('code', { class: 'grow' }, o.invite),
           h('button', { onclick: act(async () => { await navigator.clipboard.writeText(o.invite); toast('Copied'); }) }, 'Copy'),
@@ -232,10 +305,11 @@ const pages = {
       h('h2', {}, 'Skills'),
       h('div', { class: 'list' }, d.skills.length ? d.skills.map((s) => skillRow(s)) : h('p', { class: 'muted' }, 'No skills yet.')),
       h('h2', {}, 'Members'),
+      h('p', { class: 'muted' }, Object.entries(ROLE_HELP).map(([r, t]) => `${r[0].toUpperCase() + r.slice(1)}: ${t.toLowerCase()}.`).join(' ')),
       h('table', {}, d.members.map((m) => h('tr', {},
         h('td', {}, m.name, ' ', h('span', { class: 'muted' }, `@${m.handle}`)),
         h('td', {}, owner ? h('select', { 'aria-label': `Role for ${m.handle}`, onchange: act(async (e) => { await api('POST', `/api/orgs/${slug}/members/${m.id}`, { role: e.target.value }); toast('Role saved'); }) },
-          ['owner', 'admin', 'member'].map((r) => h('option', { value: r, selected: r === m.role }, r))) : m.role),
+          Object.keys(ROLE_HELP).map((r) => h('option', { value: r, selected: r === m.role }, r))) : m.role),
         h('td', {}, (admin || m.id === me.user.id) && h('button', { class: 'danger', onclick: act(async () => {
           await api('DELETE', `/api/orgs/${slug}/members/${m.id}`);
           if (m.id === me.user.id) go('/orgs'); else render();
@@ -245,20 +319,71 @@ const pages = {
 
   async devices() {
     const { tokens } = await api('GET', '/api/tokens');
-    $main.replaceChildren(h('h1', {}, 'Devices'),
-      h('p', { class: 'lead' }, 'Machines signed in with the skillnet command. Sign one out and it stops syncing.'),
-      h('div', { class: 'list' }, tokens.length ? tokens.map((t) => h('div', { class: 'card row' },
-        h('div', { class: 'grow' }, h('strong', {}, t.label), h('div', { class: 'muted' }, `Added ${when(t.created)} · last seen ${when(t.used)}`)),
-        h('button', { class: 'danger', onclick: act(async () => { await api('DELETE', `/api/tokens/${t.id}`); render(); }) }, 'Sign out'))) : h('p', { class: 'muted' }, 'No machines yet.')));
+    const keys = tokens.filter((t) => t.kind === 'key'), machines = tokens.filter((t) => t.kind !== 'key');
+    const row = (t, sub) => h('div', { class: 'card row' },
+      h('div', { class: 'grow' }, h('strong', {}, t.label), h('div', { class: 'muted' }, `${sub}Added ${when(t.created)}, last used ${when(t.used)}`)),
+      h('button', { class: 'danger', onclick: act(async () => { if (!confirm(`Revoke ${t.label}? Anything using it stops syncing.`)) return; await api('DELETE', `/api/tokens/${t.id}`); render(); }) }, 'Revoke'));
+    fill(h('h1', {}, 'Keys and devices'),
+      h('p', { class: 'lead' }, 'API keys are for cloud runs and tools: put one in a secret named SKILLNET_KEY. Read keys sync and search; write keys can also publish.'),
+      keyMaker(() => render()),
+      h('h2', {}, 'API keys'),
+      h('div', { class: 'list' }, keys.length ? keys.map((t) => row(t, `${t.scope === 'write' ? 'Read and write' : 'Read only'}. `)) : h('p', { class: 'muted' }, 'No keys yet.')),
+      h('h2', {}, 'Signed-in machines'),
+      h('div', { class: 'list' }, machines.length ? machines.map((t) => row(t, '')) : h('p', { class: 'muted' }, 'No machines yet. See Connect.')));
+  },
+
+  // Where people run agents, and the one thing to paste for each.
+  async connect() {
+    const origin = location.origin;
+    let key = sessionStorage.getItem('sn-new-key') || '';
+    const K = () => key || 'YOUR_KEY';
+    const pull = () => `curl -fsSL -H "Authorization: Bearer $SKILLNET_KEY" ${origin}/api/pull.sh | sh`;
+    const PLACES = {
+      computer: ['This computer', () => [
+        h('p', {}, 'Run this in a terminal (needs Node 22 or newer). It signs the machine in, puts your skills in every agent it finds (Claude Code, Pi, Codex, Cursor, Gemini) and keeps them updated in the background.'),
+        snippet(`curl -fsSL ${origin}/install.sh | sh`)]],
+      claude: ['Claude Code cloud', () => [
+        h('p', {}, 'In your Claude Code environment settings, add the secret SKILLNET_KEY, then add this to the setup script. Skills are in place before the session starts.'),
+        snippet(pull()),
+        h('p', {}, 'Or put it in the repository, in .claude/settings.json, so it runs at the start of every session:'),
+        snippet(JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: 'command', command: pull() }] }] } }, null, 2))]],
+      cursor: ['Cursor background agents', () => [
+        h('p', {}, 'Add SKILLNET_KEY as a secret for background agents, then set the install step in .cursor/environment.json:'),
+        snippet(JSON.stringify({ install: pull() }, null, 2))]],
+      codex: ['Codex cloud', () => [h('p', {}, 'Add SKILLNET_KEY as a secret in the environment, and this line to its setup script:'), snippet(pull())]],
+      mcp: ['Grok, ChatGPT and other MCP clients', () => [
+        h('p', {}, 'For agents without skill folders. Add a remote MCP server with this address and header. Its tools search and read skills, show who can change them, and publish or suggest changes.'),
+        snippet(`${origin}/mcp`), snippet(`Authorization: Bearer ${K()}`),
+        h('p', {}, 'As JSON for clients that take a config file:'),
+        snippet(JSON.stringify({ mcpServers: { skillnet: { url: `${origin}/mcp`, headers: { Authorization: `Bearer ${K()}` } } } }, null, 2))]],
+      api: ['Anything else', () => [
+        h('p', {}, 'Any script, CI job or agent can use the API with the key as a bearer token. The pull script works anywhere with sh, curl and base64; choose folders with SKILLNET_DIRS.'),
+        snippet(pull()), snippet(`SKILLNET_DIRS=./.claude/skills ${pull().replace('| sh', '| sh')}`),
+        snippet(`curl -H "Authorization: Bearer $SKILLNET_KEY" "${origin}/api/skills?q=deploy"`)]],
+    };
+    let place = new URLSearchParams(location.search).get('for') || 'computer';
+    const body = h('div', { class: 'stack-gap' });
+    const tabs = h('div', { class: 'seg wrap', role: 'tablist' });
+    const draw = () => {
+      tabs.replaceChildren(...Object.entries(PLACES).map(([k, [label]]) => h('button', { role: 'tab', 'aria-selected': String(k === place), class: k === place ? 'on' : null,
+        onclick: () => { place = k; history.replaceState(null, '', `/connect?for=${k}`); draw(); } }, label)));
+      const keyStep = place !== 'computer' && (key ? h('p', { class: 'card notice' }, 'Your new key: ', h('code', {}, key), ' ', copyBtn(key), h('br'), 'Copy it now; it is not shown again.')
+        : h('div', {}, h('p', {}, '1. Make an API key for it:'), keyMaker((k) => { key = k; sessionStorage.setItem('sn-new-key', k); draw(); }, PLACES[place][0])));
+      body.replaceChildren(...[keyStep, ...PLACES[place][1]()].filter(Boolean));
+    };
+    fill(h('h1', {}, 'Connect an agent'),
+      h('p', { class: 'lead' }, 'Pick where your agent runs. Once connected, it gets your skills and the skillnet skill, so you can ask it about skills and change them without leaving the chat.'),
+      tabs, body);
+    draw();
   },
 
   async device() {
     const code = new URLSearchParams(location.search).get('code') || '';
     const msg = h('div', { class: 'err' });
-    $main.replaceChildren(h('h1', {}, 'Sign in a machine'),
+    fill(h('h1', {}, 'Sign in a machine'),
       h('p', {}, 'Check that this code matches the one in your terminal.'),
       h('form', { class: 'stack', onsubmit: act(async (e) => {
-        try { const r = await api('POST', '/api/device/approve', { user_code: new FormData(e.target).get('code') }); $main.replaceChildren(h('h1', {}, 'Approved'), h('p', {}, `${r.label} is signed in. You can close this tab.`)); }
+        try { const r = await api('POST', '/api/device/approve', { user_code: new FormData(e.target).get('code') }); fill(h('h1', {}, 'Approved'), h('p', {}, `${r.label} is signed in. You can close this tab.`)); }
         catch (x) { msg.textContent = x.message; }
       }) }, h('label', { for: 'd-code' }, 'Code'), h('input', { id: 'd-code', name: 'code', value: code, required: true, autocapitalize: 'characters' }), h('button', { class: 'primary' }, 'Approve'), msg));
   },
@@ -283,7 +408,7 @@ async function render() {
     else if (o) await pages.org(o[1]);
     else await (pages[p.slice(1) || 'home'] || pages.home)();
   } catch (e) {
-    $main.replaceChildren(h('h1', {}, 'Something went wrong'), h('p', { class: 'err' }, e.message));
+    fill(h('h1', {}, 'Something went wrong'), h('p', { class: 'err' }, e.message));
   } finally { $main.classList.remove('loading'); }
 }
 render();

@@ -17,7 +17,13 @@ const SKIP = new Set(['.git', 'node_modules', '.DS_Store', MARKER]);
 const KNOWN_TARGETS = ['.claude/skills', '.pi/agent/skills', '.codex/skills', '.agents/skills', '.cursor/skills', '.gemini/skills'];
 
 const readJson = (f, d) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return d; } };
-const conf = () => readJson(CONF, {});
+// SKILLNET_KEY / SKILLNET_URL (cloud runs, CI) win over the saved sign-in.
+const conf = () => {
+  const c = readJson(CONF, {});
+  if (process.env.SKILLNET_KEY) c.token = process.env.SKILLNET_KEY;
+  if (process.env.SKILLNET_URL) c.server = process.env.SKILLNET_URL.replace(/\/+$/, '');
+  return c;
+};
 const saveConf = (c) => { fs.mkdirSync(CONF_DIR, { recursive: true }); fs.writeFileSync(CONF, JSON.stringify(c, null, 2), { mode: 0o600 }); };
 const log = (...a) => console.log(...a);
 const die = (msg) => { console.error(`skillnet: ${msg}`); process.exit(1); };
@@ -180,13 +186,23 @@ async function push(dir, flags) {
   log(`${out.changed ? 'published' : 'no changes to'} ${s.owner}/${s.name} v${s.version} (${s.visibility}${s.required ? ', required' : ''})`);
 }
 
-async function findSkill(ref) {
-  const [owner, name] = ref.includes('/') ? ref.split('/') : [null, ref];
-  const { skills } = await api('GET', `/api/skills?q=${encodeURIComponent(name)}`);
-  const hits = skills.filter((s) => s.id === ref || (s.name === name && (!owner || s.owner === owner)));
-  if (hits.length !== 1) die(hits.length ? `several skills are named ${name}; use owner/name` : `no skill ${ref}`);
-  return hits[0];
+const findSkill = async (ref) => (await api('GET', `/api/resolve?ref=${encodeURIComponent(ref)}`)).skill;
+// Plain-text answers come from the same tools agents use over MCP, so the command and MCP say the same thing.
+async function tool(name, args = {}) {
+  const r = await api('POST', '/api/mcp', { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } });
+  if (r.error) die(r.error.message);
+  if (r.result.isError) die(r.result.content[0].text);
+  return r.result.content[0].text;
 }
+async function suggest(dir, flags) {
+  dir = path.resolve(dir || '.');
+  if (!flags.to) die('usage: skillnet suggest <dir> --to owner/name --note "why"');
+  if (!fs.existsSync(path.join(dir, 'SKILL.md'))) die(`${dir} has no SKILL.md`);
+  const s = await findSkill(flags.to);
+  const r = await api('POST', `/api/skills/${s.id}/proposals`, { files: readFolder(dir), note: flags.note });
+  log(`suggested change ${r.proposal.id} sent to the editors of ${r.proposal.skill}`);
+}
+const userByHandle = (list, handle) => list.find((u) => u.handle === handle.replace(/^@/, '')) || die(`@${handle} is not in that list`);
 
 // Run `skillnet watch` at login: launchd on macOS, a systemd user unit on Linux.
 function serviceInstall() {
@@ -228,39 +244,117 @@ function piExtension() {
   log('Pi extension installed: Pi reloads skills by itself when they change (new Pi sessions pick it up)');
 }
 
+const BOOL = new Set(['required', 'optional', 'json', 'write', 'yes', 'new']);
 function parseFlags(args) {
   const flags = {}, rest = [];
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (!a.startsWith('--')) { rest.push(a); continue; }
     const [k, v] = a.slice(2).split('=');
-    flags[k] = v ?? (['required', 'optional'].includes(k) ? true : args[++i]);
+    flags[k] = v ?? (BOOL.has(k) ? true : args[++i]);
   }
   return { flags, rest };
 }
 
-const HELP = `skillnet — share agent skills with friends and organizations
+const HELP = `skillnet — share agent skills with friends and organizations (add --json for data)
 
-  skillnet setup <server>        sign in, turn on background sync, add the Pi reload extension
-  skillnet login <server>        sign in only
-  skillnet push [dir] [--org ID] [--visibility private|friends|org|public] [--required|--optional] [--note TEXT]
-  skillnet install owner/name    add someone's skill to all your machines
-  skillnet remove owner/name     take it off again
-  skillnet list                  skills this machine should have
-  skillnet sync                  sync now
-  skillnet watch                 stay connected and sync on every change (what the background service runs)
-  skillnet targets               folders skillnet writes to (set "targets" in ${CONF} to change)`;
+Questions
+  whoami                         account, organizations, roles, friends
+  search [words]                 skills you can see
+  show owner/name [file]         print SKILL.md or another file
+  info owner/name                owner, who can edit, versions, open suggestions
+  list                           skills this machine gets
+  suggestions [owner/name]       suggested changes waiting for review
+
+Changes
+  push [dir] [--org ID] [--visibility private|friends|org|public] [--required|--optional] [--note TEXT]
+  suggest [dir] --to owner/name [--note TEXT]    propose a change to a skill you cannot edit
+  approve ID | decline ID        review a suggestion (editors)
+  install owner/name | remove owner/name         add or drop it on all your machines
+  require owner/name | optional owner/name       organization admins: everyone gets it, or only who adds it
+  visibility owner/name private|friends|org|public
+  rollback owner/name VERSION
+  delete owner/name --yes
+
+People
+  friends | friend add WHO | friend remove HANDLE
+  orgs | org create ID [NAME] | org show ID | org invite ID [--new] | join CODE-OR-LINK
+  org role ID HANDLE owner|admin|editor|member | org remove ID HANDLE
+
+Machines and keys
+  setup <server>                 sign in, background sync, Pi reload extension
+  login <server> [--key KEY]     sign in only (a key skips the browser step)
+  keys | key create LABEL [--write] | key revoke ID
+  sync | watch | targets
+  Cloud runs: set SKILLNET_KEY (and SKILLNET_URL) instead of signing in.`;
+
+const out = (flags, data, text) => log(flags.json ? JSON.stringify(data, null, 2) : typeof text === 'function' ? text(data) : text);
+const when = (t) => (t ? new Date(t).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : 'never');
 
 async function main() {
   const [cmd, ...args] = process.argv.slice(2);
   const { flags, rest } = parseFlags(args);
+  const ref = () => rest[0] || die(`usage: skillnet ${cmd} owner/name`);
+  const need = (i, what) => rest[i] || die(`usage: skillnet ${cmd} ${what}`);
+  const sub = rest.shift();
+  if (!['friend', 'org', 'key'].includes(cmd) && sub !== undefined) rest.unshift(sub);
   switch (cmd) {
     case 'setup': await login(rest[0]); piExtension(); await sync(); serviceInstall(); break;
-    case 'login': await login(rest[0]); break;
+    case 'login':
+      if (flags.key) { const server = (rest[0] || conf().server || die('usage: skillnet login <server> --key KEY')).replace(/\/+$/, ''); saveConf({ ...readJson(CONF, {}), server, token: flags.key }); log(`signed in as @${(await api('GET', '/api/me')).user.handle}`); }
+      else await login(rest[0]);
+      break;
+    case 'whoami': flags.json ? out(flags, await api('GET', '/api/me')) : log(await tool('my_account')); break;
+    case 'search': {
+      const q = rest.join(' ');
+      flags.json ? out(flags, (await api('GET', `/api/skills?q=${encodeURIComponent(q)}`)).skills) : log(await tool('search_skills', { query: q }));
+      break;
+    }
+    case 'show': { const s = await findSkill(ref()); const f = await api('GET', `/api/skills/${s.id}/file?path=${encodeURIComponent(rest[1] || 'SKILL.md')}`); out(flags, f, f.text); break; }
+    case 'info': flags.json ? out(flags, await api('GET', `/api/skills/${(await findSkill(ref())).id}`)) : log(await tool('skill_info', { skill: ref() })); break;
+    case 'list': { const { skills } = await api('GET', '/api/manifest'); out(flags, skills, () => skills.map((s) => `${s.owner}/${s.name} v${s.version}${s.required ? ' (required)' : ''}`).join('\n')); break; }
+    case 'suggestions': {
+      const s = rest[0] && await findSkill(rest[0]);
+      const { proposals } = await api('GET', `/api/proposals${s ? `?skill=${s.id}` : ''}`);
+      out(flags, proposals, () => proposals.map((p) => `${p.id}  ${p.skill}  by @${p.author} on v${p.base_version}${p.base_version !== p.current_version ? ` (now v${p.current_version})` : ''}: ${p.note || '(no note)'}`).join('\n') || 'No suggestions waiting.');
+      break;
+    }
     case 'push': await push(rest[0], flags); break;
-    case 'install': { const s = await findSkill(rest[0] || die('usage: skillnet install owner/name')); await api('POST', `/api/skills/${s.id}/install`); await sync(); break; }
-    case 'remove': { const s = await findSkill(rest[0] || die('usage: skillnet remove owner/name')); await api('DELETE', `/api/skills/${s.id}/install`); await sync(); break; }
-    case 'list': for (const s of (await api('GET', '/api/manifest')).skills) log(`${s.owner}/${s.name} v${s.version}${s.required ? ' (required by organization)' : ''}`); break;
+    case 'suggest': await suggest(rest[0], flags); break;
+    case 'approve': { const r = await api('POST', `/api/proposals/${need(0, 'ID')}/approve`); log(`approved: ${r.skill.owner}/${r.skill.name} is now v${r.skill.version}`); break; }
+    case 'decline': await api('POST', `/api/proposals/${need(0, 'ID')}/decline`); log('declined'); break;
+    case 'install': { const s = await findSkill(ref()); await api('POST', `/api/skills/${s.id}/install`); await sync(); break; }
+    case 'remove': { const s = await findSkill(ref()); await api('DELETE', `/api/skills/${s.id}/install`); await sync(); break; }
+    case 'require': case 'optional': { const s = await findSkill(ref()); await api('PATCH', `/api/skills/${s.id}`, { required: cmd === 'require' }); log(`${s.owner}/${s.name} is now ${cmd === 'require' ? 'required for every member' : 'optional'}`); break; }
+    case 'visibility': { const s = await findSkill(ref()); await api('PATCH', `/api/skills/${s.id}`, { visibility: need(1, 'owner/name private|friends|org|public') }); log(`${s.owner}/${s.name} visibility: ${rest[1]}`); break; }
+    case 'rollback': { const s = await findSkill(ref()); const r = await api('POST', `/api/skills/${s.id}/rollback`, { version: Number(need(1, 'owner/name VERSION')) }); log(`${s.owner}/${s.name} is back to version ${rest[1]} (saved as v${r.skill.version})`); break; }
+    case 'delete': { if (!flags.yes) die('this removes it from every machine; add --yes to confirm'); const s = await findSkill(ref()); await api('DELETE', `/api/skills/${s.id}`); log(`deleted ${s.owner}/${s.name}`); break; }
+    case 'friends': { const f = await api('GET', '/api/friends'); out(flags, f, () => [`Friends: ${f.friends.map((u) => `@${u.handle}`).join(', ') || 'none'}`, f.incoming.length && `Asking you: ${f.incoming.map((u) => `@${u.handle}`).join(', ')} (accept with: skillnet friend add HANDLE)`, f.outgoing.length && `Waiting for: ${f.outgoing.map((u) => `@${u.handle}`).join(', ')}`].filter(Boolean).join('\n')); break; }
+    case 'friend':
+      if (sub === 'add') { const r = await api('POST', '/api/friends', { who: need(0, 'add WHO') }); log(r.status === 'accepted' ? `you and @${r.user.handle} are friends` : `request sent to @${r.user.handle}`); }
+      else if (sub === 'remove') { const f = await api('GET', '/api/friends'); const u = userByHandle([...f.friends, ...f.incoming, ...f.outgoing], need(0, 'remove HANDLE')); await api('DELETE', `/api/friends/${u.id}`); log(`removed @${u.handle}`); }
+      else die('usage: skillnet friend add|remove WHO');
+      break;
+    case 'orgs': { const { orgs } = await api('GET', '/api/me'); out(flags, orgs, () => orgs.map((o) => `${o.slug}  ${o.name} (${o.role})`).join('\n') || 'No organizations.'); break; }
+    case 'org': {
+      const id = need(0, `${sub || 'show'} ID`);
+      if (sub === 'create') { const r = await api('POST', '/api/orgs', { slug: id, name: rest.slice(1).join(' ') || id }); log(`created ${r.org.slug}; invite people with: skillnet org invite ${r.org.slug}`); }
+      else if (sub === 'show') { const d = await api('GET', `/api/orgs/${id}`); out(flags, d, () => [`${d.org.name} (${d.org.slug}), you are ${d.org.role}`, 'Members:', ...d.members.map((m) => `  @${m.handle} ${m.role}`), 'Skills:', ...d.skills.map((s) => `  ${s.name} v${s.version}${s.required ? ' required' : ''}`)].join('\n')); }
+      else if (sub === 'invite') { const link = flags.new ? (await api('POST', `/api/orgs/${id}/invite`)).invite : (await api('GET', `/api/orgs/${id}`)).org.invite; log(link || die('only admins see the invite link')); }
+      else if (sub === 'role' || sub === 'remove') {
+        const d = await api('GET', `/api/orgs/${id}`), m = userByHandle(d.members, need(1, `${sub} ID HANDLE`));
+        if (sub === 'role') { await api('POST', `/api/orgs/${id}/members/${m.id}`, { role: need(2, 'role ID HANDLE owner|admin|editor|member') }); log(`@${m.handle} is now ${rest[2]} in ${id}`); }
+        else { await api('DELETE', `/api/orgs/${id}/members/${m.id}`); log(`removed @${m.handle} from ${id}`); }
+      } else die('usage: skillnet org create|show|invite|role|remove ID ...');
+      break;
+    }
+    case 'join': { const code = need(0, 'CODE-OR-LINK'); const r = await api('POST', '/api/join', { code: /code=([\w-]+)/.exec(code)?.[1] || code }); log(`you joined ${r.org.name}`); await sync(); break; }
+    case 'keys': { const { tokens } = await api('GET', '/api/tokens'); out(flags, tokens, () => tokens.map((t) => `${t.id}  ${t.kind === 'key' ? `key (${t.scope})` : 'machine'}  ${t.label}  last used ${when(t.used)}`).join('\n') || 'None.'); break; }
+    case 'key':
+      if (sub === 'create') { const r = await api('POST', '/api/keys', { label: rest.join(' ') || die('usage: skillnet key create LABEL [--write]'), scope: flags.write ? 'write' : 'read' }); out(flags, r, `${r.key}\n(${r.scope} key "${r.label}"; shown once. Set it as SKILLNET_KEY in the cloud run's secrets.)`); }
+      else if (sub === 'revoke') { await api('DELETE', `/api/tokens/${need(0, 'revoke ID')}`); log('revoked'); }
+      else die('usage: skillnet key create|revoke ...');
+      break;
     case 'sync': { const r = await sync(); log(`${r.skills} skills, ${r.changed} changes`); break; }
     case 'watch': await watch(); break;
     case 'targets': for (const t of targets()) log(t); break;

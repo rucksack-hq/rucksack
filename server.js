@@ -13,6 +13,10 @@ const MAX_BUNDLE = 5 * 1024 * 1024;
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const VIS_USER = ['private', 'friends', 'public'];
 const VIS_ORG = ['org', 'public'];
+const ROLES = ['owner', 'admin', 'editor', 'member'];
+// The skill every account gets: teaches agents to answer Skillnet questions from the harness.
+const GUIDE_ID = 'skillnet-guide';
+const guideFiles = (baseUrl) => ({ 'SKILL.md': Buffer.from(fs.readFileSync(path.join(HERE, 'builtin', 'skillnet', 'SKILL.md'), 'utf8').replaceAll('{{URL}}', baseUrl)).toString('base64') });
 
 export function openDb(file) {
   if (file !== ':memory:') fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -38,7 +42,13 @@ export function openDb(file) {
       bundle TEXT NOT NULL, author TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', created INTEGER NOT NULL, PRIMARY KEY(skill_id,version));
     CREATE TABLE IF NOT EXISTS installs(user_id TEXT NOT NULL REFERENCES users ON DELETE CASCADE, skill_id TEXT NOT NULL REFERENCES skills ON DELETE CASCADE,
       PRIMARY KEY(user_id,skill_id));
+    CREATE TABLE IF NOT EXISTS proposals(id TEXT PRIMARY KEY, skill_id TEXT NOT NULL REFERENCES skills ON DELETE CASCADE,
+      user_id TEXT NOT NULL REFERENCES users ON DELETE CASCADE, base_version INTEGER NOT NULL, bundle TEXT NOT NULL, note TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'open', created INTEGER NOT NULL);
   `);
+  // Columns added after the first release.
+  for (const sql of [`ALTER TABLE tokens ADD COLUMN scope TEXT NOT NULL DEFAULT 'write'`, `ALTER TABLE skills ADD COLUMN body TEXT NOT NULL DEFAULT ''`])
+    try { db.exec(sql); } catch (e) { if (!/duplicate column/.test(e.message)) throw e; }
   return db;
 }
 
@@ -105,20 +115,24 @@ export function createApp({ db, baseUrl = '' }) {
 
   const role = (orgId, u) => one('SELECT role FROM members WHERE org_id=:o AND user_id=:u', { o: orgId, u })?.role;
   const isAdmin = (orgId, u) => ['owner', 'admin'].includes(role(orgId, u));
-  const canEdit = (s, u) => (s.owner_user ? s.owner_user === u : isAdmin(s.owner_org, u));
+  const isEditor = (orgId, u) => ['owner', 'admin', 'editor'].includes(role(orgId, u));
+  // Editors change what a skill says; admins also decide who gets it (visibility, required, delete).
+  const canEdit = (s, u) => (s.owner_user ? s.owner_user === u : isEditor(s.owner_org, u));
+  const canManage = (s, u) => (s.owner_user ? s.owner_user === u : isAdmin(s.owner_org, u));
   const getOrg = (slug) => one('SELECT * FROM orgs WHERE slug=:slug', { slug }) || fail(404, 'no such organization');
   const visibleSkill = (id, u) =>
     one(`SELECT ${SKILL_COLS} FROM ${SKILL_FROM} WHERE s.id=:id AND ${VISIBLE}`, { id, u }) || fail(404, 'no such skill');
   const pubSkill = (s, u) => ({
     id: s.id, owner: s.owner, owner_kind: s.owner_kind, name: s.name, description: s.description, visibility: s.visibility,
-    required: !!s.required, version: s.version, hash: s.hash, updated: s.updated, can_edit: canEdit(s, u),
+    required: !!s.required, version: s.version, hash: s.hash, updated: s.updated, can_edit: canEdit(s, u), can_manage: canManage(s, u),
     installed: !!one('SELECT 1 x FROM installs WHERE user_id=:u AND skill_id=:s', { u, s: s.id }),
+    open_proposals: canEdit(s, u) ? one(`SELECT count(*) n FROM proposals WHERE skill_id=:s AND status='open'`, { s: s.id }).n : 0,
   });
   const userOut = (r) => r && { id: r.id, handle: r.handle, name: r.name };
 
-  function issueToken(userId, kind, label) {
+  function issueToken(userId, kind, label, scope = 'write') {
     const token = `sn_${rid(32)}`;
-    run('INSERT INTO tokens VALUES(:id,:h,:u,:k,:l,:c,NULL)', { id: rid(8), h: sha(token), u: userId, k: kind, l: label, c: now() });
+    run('INSERT INTO tokens(id,hash,user_id,kind,label,created,scope) VALUES(:id,:h,:u,:k,:l,:c,:s)', { id: rid(8), h: sha(token), u: userId, k: kind, l: label, c: now(), s: scope });
     return token;
   }
   function auth(req) {
@@ -126,12 +140,13 @@ export function createApp({ db, baseUrl = '' }) {
     const cookie = /(?:^|;\s*)sn=([^;]+)/.exec(req.headers.cookie || '')?.[1];
     const tok = bearer || cookie;
     if (!tok) return null;
-    const row = one('SELECT t.id tid, u.* FROM tokens t JOIN users u ON u.id=t.user_id WHERE t.hash=:h', { h: sha(tok) });
+    const row = one('SELECT t.id tid, t.scope, u.* FROM tokens t JOIN users u ON u.id=t.user_id WHERE t.hash=:h', { h: sha(tok) });
     if (row) run('UPDATE tokens SET used=:n WHERE id=:id', { n: now(), id: row.tid });
     return row || null;
   }
 
-  function pushSkill(me, b) {
+  // Publish files as a new version. `author` is who wrote the change (the proposer when an editor approves one).
+  function pushSkill(me, b, author = me.id) {
     checkFiles(b.files);
     const size = Object.values(b.files).reduce((n, v) => n + v.length, 0);
     if (size > MAX_BUNDLE) fail(413, 'skill is larger than 5 MB');
@@ -141,29 +156,33 @@ export function createApp({ db, baseUrl = '' }) {
     if (!NAME_RE.test(name)) fail(400, 'skill name must be lowercase letters, digits and dashes');
     const description = String(b.description ?? fm.description ?? '').slice(0, 1024);
     let org = null;
-    if (b.org) { org = getOrg(b.org); if (!isAdmin(org.id, me.id)) fail(403, 'only organization admins can publish its skills'); }
+    if (b.org) { org = getOrg(b.org); if (!isEditor(org.id, me.id)) fail(403, `only editors and admins of ${org.slug} can change its skills; suggest a change instead`); }
     const allowed = org ? VIS_ORG : VIS_USER;
     let s = one('SELECT * FROM skills WHERE coalesce(owner_user, owner_org)=:o AND name=:n', { o: org ? org.id : me.id, n: name });
     const visibility = b.visibility ?? s?.visibility ?? allowed[0];
     if (!allowed.includes(visibility)) fail(400, `visibility must be one of ${allowed.join(', ')}`);
+    const required = org ? (b.required === undefined ? !!s?.required : !!b.required) : false;
+    if (org && !isAdmin(org.id, me.id) && (visibility !== (s?.visibility ?? 'org') || required !== !!s?.required))
+      fail(403, 'only admins decide who gets an organization skill (visibility, required)');
+    const body = md.slice(0, 100e3);
     const hash = bundleHash(b.files);
     db.exec('BEGIN');
     try {
       if (!s) {
         const id = rid(9);
         run('INSERT INTO skills(id,owner_user,owner_org,name,description,visibility,required,updated) VALUES(:id,:ou,:oo,:n,:d,:v,:r,:t)',
-          { id, ou: org ? null : me.id, oo: org ? org.id : null, n: name, d: description, v: visibility, r: org && b.required ? 1 : 0, t: now() });
+          { id, ou: org ? null : me.id, oo: org ? org.id : null, n: name, d: description, v: visibility, r: required ? 1 : 0, t: now() });
         run('INSERT OR IGNORE INTO installs VALUES(:u,:s)', { u: me.id, s: id }); // authors get their skill on every machine
         s = one('SELECT * FROM skills WHERE id=:id', { id });
       }
       const changed = hash !== s.hash;
       if (changed) {
         const v = s.version + 1;
-        run('INSERT INTO versions VALUES(:s,:v,:h,:b,:a,:note,:t)', { s: s.id, v, h: hash, b: JSON.stringify(b.files), a: me.id, note: String(b.note || ''), t: now() });
+        run('INSERT INTO versions VALUES(:s,:v,:h,:b,:a,:note,:t)', { s: s.id, v, h: hash, b: JSON.stringify(b.files), a: author, note: String(b.note || ''), t: now() });
         run('UPDATE skills SET version=:v, hash=:h, updated=:t WHERE id=:s', { v, h: hash, t: now(), s: s.id });
       }
-      run('UPDATE skills SET description=:d, visibility=:v, required=:r WHERE id=:s',
-        { d: description, v: visibility, r: org ? (b.required === undefined ? s.required : b.required ? 1 : 0) : 0, s: s.id });
+      run('UPDATE skills SET description=:d, visibility=:v, required=:r, body=:body WHERE id=:s',
+        { d: description, v: visibility, r: required ? 1 : 0, body, s: s.id });
       db.exec('COMMIT');
       s = one(`SELECT ${SKILL_COLS} FROM ${SKILL_FROM} WHERE s.id=:id`, { id: s.id });
       notify(audience(s));
@@ -224,7 +243,14 @@ export function createApp({ db, baseUrl = '' }) {
     run('UPDATE devices SET user_id=:u, token=:t WHERE device_code=:d', { u: me.id, t: issueToken(me.id, 'cli', d.label), d: d.device_code });
     return { ok: true, label: d.label };
   });
-  r('GET', '/api/tokens', false, ({ me }) => ({ tokens: all(`SELECT id, label, created, used FROM tokens WHERE user_id=:u AND kind='cli' ORDER BY created DESC`, { u: me.id }) }));
+  r('GET', '/api/tokens', false, ({ me }) => ({ tokens: all(`SELECT id, kind, scope, label, created, used FROM tokens WHERE user_id=:u AND kind IN ('cli','key') ORDER BY created DESC`, { u: me.id }) }));
+  // API keys for cloud runs and tools that cannot do the device sign-in. "read" keys sync and search only.
+  r('POST', '/api/keys', false, ({ me, body }) => {
+    const scope = body.scope || 'read';
+    if (!['read', 'write'].includes(scope)) fail(400, 'scope must be read or write');
+    const label = String(body.label || '').trim().slice(0, 80) || fail(400, 'give the key a name, like "Cursor cloud"');
+    return { key: issueToken(me.id, 'key', label, scope), label, scope };
+  });
   r('DELETE', '/api/tokens/([\\w-]+)', false, ({ me, m }) => { run('DELETE FROM tokens WHERE id=:id AND user_id=:u', { id: m[1], u: me.id }); return { ok: true }; });
 
   // Friends: a request is a row (a=requester, b=addressee, pending); accepting flips it to accepted.
@@ -287,7 +313,7 @@ export function createApp({ db, baseUrl = '' }) {
   r('POST', '/api/orgs/([\\w-]+)/members/([\\w-]+)', false, ({ me, m, body }) => {
     const o = getOrg(m[1]);
     if (role(o.id, me.id) !== 'owner') fail(403, 'only owners can change roles');
-    if (!['owner', 'admin', 'member'].includes(body.role)) fail(400, 'role must be owner, admin or member');
+    if (!ROLES.includes(body.role)) fail(400, `role must be one of ${ROLES.join(', ')}`);
     if (m[2] === me.id && body.role !== 'owner' && lastOwner(o.id)) fail(400, 'make someone else an owner first');
     run('UPDATE members SET role=:r WHERE org_id=:o AND user_id=:u', { r: body.role, o: o.id, u: m[2] });
     return { ok: true };
@@ -306,10 +332,21 @@ export function createApp({ db, baseUrl = '' }) {
   // Skills
   r('GET', '/api/skills', false, ({ me, query }) => {
     const q = `%${(query.get('q') || '').toLowerCase()}%`;
+    // Name and description matches first, then matches in the SKILL.md text.
     return {
-      skills: all(`SELECT ${SKILL_COLS} FROM ${SKILL_FROM} WHERE ${VISIBLE} AND s.version>0 AND (lower(s.name) LIKE :q OR lower(s.description) LIKE :q)
-        ORDER BY s.updated DESC LIMIT 300`, { u: me.id, q }).map((s) => pubSkill(s, me.id)),
+      skills: all(`SELECT ${SKILL_COLS} FROM ${SKILL_FROM} WHERE ${VISIBLE} AND s.version>0
+        AND (lower(s.name) LIKE :q OR lower(s.description) LIKE :q OR lower(s.body) LIKE :q)
+        ORDER BY (lower(s.name) LIKE :q OR lower(s.description) LIKE :q) DESC, s.updated DESC LIMIT 300`, { u: me.id, q }).map((s) => pubSkill(s, me.id)),
     };
+  });
+  // "owner/name" or an id -> the skill, for commands and agents.
+  r('GET', '/api/resolve', false, ({ me, query }) => {
+    const ref = String(query.get('ref') || '').replace(/^@/, '');
+    const [owner, name] = ref.includes('/') ? ref.split('/') : [null, ref];
+    const hits = all(`SELECT ${SKILL_COLS} FROM ${SKILL_FROM} WHERE ${VISIBLE} AND (s.id=:ref OR (s.name=:n AND (:o IS NULL OR coalesce(u.handle, o.slug)=:o)))`,
+      { u: me.id, ref, n: name, o: owner });
+    if (hits.length !== 1) fail(hits.length ? 409 : 404, hits.length ? `several skills are named ${name}: ${hits.map((s) => `${s.owner}/${s.name}`).join(', ')}` : `no skill ${ref} that you can see`);
+    return { skill: pubSkill(hits[0], me.id) };
   });
   r('POST', '/api/skills/push', false, ({ me, body }) => pushSkill(me, body));
   r('GET', '/api/skills/([\\w-]+)', false, ({ me, m }) => {
@@ -323,14 +360,15 @@ export function createApp({ db, baseUrl = '' }) {
       versions: all('SELECT v.version, v.hash, v.note, v.created, u.handle author FROM versions v JOIN users u ON u.id=v.author WHERE v.skill_id=:s ORDER BY v.version DESC', { s: s.id }),
     };
   });
-  r('GET', '/api/skills/([\\w-]+)/bundle', false, ({ me, m }) => {
-    const s = visibleSkill(m[1], me.id);
-    const v = one('SELECT bundle FROM versions WHERE skill_id=:s AND version=:v', { s: s.id, v: s.version }) || fail(404, 'skill has no versions');
-    return { id: s.id, name: s.name, hash: s.hash, version: s.version, files: JSON.parse(v.bundle) };
+  r('GET', '/api/skills/([\\w-]+)/bundle', false, ({ me, m }) => bundleOf(m[1], me.id));
+  r('GET', '/api/skills/([\\w-]+)/file', false, ({ me, m, query }) => {
+    const files = bundleOf(m[1], me.id).files, p = query.get('path') || 'SKILL.md';
+    if (!(p in files)) fail(404, `no file ${p}; files: ${Object.keys(files).join(', ')}`);
+    return { path: p, text: Buffer.from(files[p], 'base64').toString('utf8') };
   });
   r('PATCH', '/api/skills/([\\w-]+)', false, ({ me, m, body }) => {
     const s = visibleSkill(m[1], me.id);
-    if (!canEdit(s, me.id)) fail(403, 'you cannot change this skill');
+    if (!canManage(s, me.id)) fail(403, s.owner_org ? 'only admins decide who gets an organization skill' : 'you cannot change this skill');
     const allowed = s.owner_org ? VIS_ORG : VIS_USER;
     const visibility = body.visibility ?? s.visibility;
     if (!allowed.includes(visibility)) fail(400, `visibility must be one of ${allowed.join(', ')}`);
@@ -344,11 +382,11 @@ export function createApp({ db, baseUrl = '' }) {
     const s = visibleSkill(m[1], me.id);
     if (!canEdit(s, me.id)) fail(403, 'you cannot change this skill');
     const v = one('SELECT bundle FROM versions WHERE skill_id=:s AND version=:v', { s: s.id, v: Number(body.version) }) || fail(404, 'no such version');
-    return pushSkill(me, { org: s.owner_org ? s.owner : undefined, name: s.name, description: s.description, files: JSON.parse(v.bundle), note: `rolled back to version ${body.version}` });
+    return pushSkill(me, { org: s.owner_org ? s.owner : undefined, name: s.name, files: JSON.parse(v.bundle), note: `rolled back to version ${body.version}` });
   });
   r('DELETE', '/api/skills/([\\w-]+)', false, ({ me, m }) => {
     const s = visibleSkill(m[1], me.id);
-    if (!canEdit(s, me.id)) fail(403, 'you cannot delete this skill');
+    if (!canManage(s, me.id)) fail(403, 'only admins can delete this skill');
     const who = audience(s);
     run('DELETE FROM skills WHERE id=:s', { s: s.id });
     notify(who);
@@ -366,13 +404,87 @@ export function createApp({ db, baseUrl = '' }) {
     return { ok: true };
   });
 
-  // What this user's machines should have: installed skills they can still see, plus every required skill of their organizations.
-  r('GET', '/api/manifest', false, ({ me }) => ({
-    skills: all(`SELECT ${SKILL_COLS} FROM ${SKILL_FROM} WHERE s.version>0 AND (
+  // Suggested changes: anyone who can see a skill but not edit it proposes new files; an editor approves or declines.
+  r('POST', '/api/skills/([\\w-]+)/proposals', false, ({ me, m, body }) => {
+    const s = visibleSkill(m[1], me.id);
+    checkFiles(body.files);
+    if (bundleHash(body.files) === s.hash) fail(400, 'that is the same as the current version');
+    const id = rid(9);
+    run('INSERT INTO proposals(id,skill_id,user_id,base_version,bundle,note,created) VALUES(:id,:s,:u,:v,:b,:n,:t)',
+      { id, s: s.id, u: me.id, v: s.version, b: JSON.stringify(body.files), n: String(body.note || '').slice(0, 2000), t: now() });
+    return { proposal: { id, skill: `${s.owner}/${s.name}`, status: 'open' } };
+  });
+  r('GET', '/api/proposals', false, ({ me, query }) => {
+    const rows = all(`SELECT p.id, p.skill_id, p.user_id, p.bundle, p.note, p.created, p.base_version, a.handle author,
+        s.owner_user, s.owner_org, s.name, s.version, coalesce(u.handle, o.slug) owner
+      FROM proposals p JOIN users a ON a.id=p.user_id JOIN skills s ON s.id=p.skill_id LEFT JOIN users u ON u.id=s.owner_user LEFT JOIN orgs o ON o.id=s.owner_org
+      WHERE p.status='open' AND (:sid IS NULL OR p.skill_id=:sid) ORDER BY p.created DESC`, { sid: query.get('skill') || null });
+    return {
+      proposals: rows.filter((p) => canEdit(p, me.id) || p.user_id === me.id).map((p) => {
+        const files = JSON.parse(p.bundle);
+        return { id: p.id, skill_id: p.skill_id, skill: `${p.owner}/${p.name}`, author: p.author, note: p.note, created: p.created, base_version: p.base_version,
+          current_version: p.version, can_approve: canEdit(p, me.id), files: Object.keys(files).sort(),
+          skill_md: files['SKILL.md'] ? Buffer.from(files['SKILL.md'], 'base64').toString('utf8') : '' };
+      }),
+    };
+  });
+  const getProposal = (id) => one(`SELECT * FROM proposals WHERE id=:id AND status='open'`, { id }) || fail(404, 'no open suggestion with that id');
+  r('POST', '/api/proposals/([\\w-]+)/approve', false, ({ me, m }) => {
+    const p = getProposal(m[1]), s = visibleSkill(p.skill_id, me.id);
+    if (!canEdit(s, me.id)) fail(403, 'only editors can approve suggestions');
+    const out = pushSkill(me, { org: s.owner_org ? s.owner : undefined, name: s.name, files: JSON.parse(p.bundle), note: p.note || 'suggested change' }, p.user_id);
+    run(`UPDATE proposals SET status='approved' WHERE id=:id`, { id: p.id });
+    return out;
+  });
+  r('POST', '/api/proposals/([\\w-]+)/decline', false, ({ me, m }) => {
+    const p = getProposal(m[1]), s = visibleSkill(p.skill_id, me.id);
+    if (!canEdit(s, me.id) && p.user_id !== me.id) fail(403, 'only editors or the author can close a suggestion');
+    run(`UPDATE proposals SET status='declined' WHERE id=:id`, { id: p.id });
+    return { ok: true };
+  });
+
+  // What this user's machines should have: installed skills they can still see, plus every required skill of their organizations,
+  // plus the built-in skillnet guide.
+  const manifest = (u) => [
+    ...all(`SELECT ${SKILL_COLS} FROM ${SKILL_FROM} WHERE s.version>0 AND (
         (s.id IN (SELECT skill_id FROM installs WHERE user_id=:u) AND ${VISIBLE})
-        OR (s.required=1 AND s.owner_org IN (SELECT org_id FROM members WHERE user_id=:u))) ORDER BY s.name`, { u: me.id })
+        OR (s.required=1 AND s.owner_org IN (SELECT org_id FROM members WHERE user_id=:u))) ORDER BY s.name`, { u })
       .map((s) => ({ id: s.id, owner: s.owner, name: s.name, version: s.version, hash: s.hash, required: !!s.required })),
-  }));
+    { id: GUIDE_ID, owner: 'skillnet', name: 'skillnet', version: 1, hash: bundleHash(guideFiles(baseUrl)), required: true, builtin: true },
+  ];
+  r('GET', '/api/manifest', false, ({ me }) => ({ skills: manifest(me.id) }));
+  const bundleOf = (id, u) => {
+    if (id === GUIDE_ID) { const files = guideFiles(baseUrl); return { id, name: 'skillnet', hash: bundleHash(files), version: 1, files }; }
+    const s = visibleSkill(id, u);
+    const v = one('SELECT bundle FROM versions WHERE skill_id=:s AND version=:v', { s: s.id, v: s.version }) || fail(404, 'skill has no versions');
+    return { id: s.id, name: s.name, hash: s.hash, version: s.version, files: JSON.parse(v.bundle) };
+  };
+
+  // One shell script that writes this person's skills into the agent folders: for cloud runs with only sh, curl and base64.
+  //   curl -fsSL -H "Authorization: Bearer $SKILLNET_KEY" <server>/api/pull.sh | sh
+  r('GET', '/api/pull.sh', false, ({ me, res }) => {
+    const q = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
+    const lines = [`#!/bin/sh`, `# Skillnet: skills for @${me.handle} from ${baseUrl}. Set SKILLNET_DIRS to choose folders.`, `set -e`,
+      `dirs="$SKILLNET_DIRS"`,
+      `if [ -z "$dirs" ]; then for d in .claude/skills .pi/agent/skills .codex/skills .agents/skills .cursor/skills .gemini/skills; do`,
+      `  [ -d "$HOME/\${d%/skills}" ] && dirs="$dirs $HOME/$d"; done; fi`,
+      `[ -n "$dirs" ] || dirs="$HOME/.claude/skills $HOME/.agents/skills"`,
+      `dec() { base64 -d 2>/dev/null || base64 -D; }`,
+      `n=0`, `for t in $dirs; do mkdir -p "$t"`];
+    for (const s of manifest(me.id)) {
+      const b = bundleOf(s.id, me.id);
+      const marker = JSON.stringify({ id: s.id, owner: s.owner, name: s.name, hash: b.hash, version: b.version, server: baseUrl, source: false });
+      lines.push(`d="$t/${s.name}"`,
+        `if [ -e "$d" ] && [ ! -f "$d/.skillnet.json" ]; then echo "skillnet: kept your own $d"; else rm -rf "$d"`);
+      for (const [p, data] of Object.entries(b.files)) {
+        lines.push(`mkdir -p "$(dirname "$d/"${q(p)})"`, `printf %s ${q(data)} | dec > "$d/"${q(p)}`);
+        if (Buffer.from(data, 'base64').subarray(0, 2).toString() === '#!') lines.push(`chmod +x "$d/"${q(p)}`);
+      }
+      lines.push(`printf %s ${q(marker)} > "$d/.skillnet.json"`, `n=$((n+1)); fi`);
+    }
+    lines.push(`done`, `echo "skillnet: ${manifest(me.id).length} skills written to:$dirs"`, '');
+    res.writeHead(200, { 'Content-Type': 'text/x-shellscript; charset=utf-8' }).end(lines.join('\n'));
+  });
   r('GET', '/api/events', false, ({ me, req, res }) => {
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
     res.write(`event: hello\ndata: {}\n\n`);
@@ -381,6 +493,74 @@ export function createApp({ db, baseUrl = '' }) {
     const ping = setInterval(() => res.write(': ping\n\n'), 25e3);
     req.on('close', () => { clearInterval(ping); streams.get(me.id)?.delete(res); });
     return undefined; // stays open
+  });
+
+  // MCP over streamable HTTP (JSON responses), for agents that take tools instead of skill folders.
+  // Each tool is a call to the API above, as the key's owner.
+  const call = async (me, method, p, body = {}) => {
+    const url = new URL(p, 'http://x');
+    const route = routes.find(([m, re]) => m === method && re.test(url.pathname));
+    if (me.scope === 'read' && method !== 'GET') fail(403, 'this API key is read-only; make a write key to publish');
+    return route[3]({ me, body, m: url.pathname.match(route[1]), query: url.searchParams });
+  };
+  const resolve = async (me, ref) => (await call(me, 'GET', `/api/resolve?ref=${encodeURIComponent(ref)}`)).skill;
+  const fileMap = (a) => Object.fromEntries(Object.entries(a.files || {}).map(([p, t]) => [p, Buffer.from(t).toString('base64')]));
+  const brief = (s) => `${s.owner}/${s.name} (v${s.version}, ${s.visibility}${s.required ? ', required' : ''}${s.can_edit ? ', you can edit' : ''}): ${s.description}`;
+  const str = (d) => ({ type: 'string', description: d });
+  const TOOLS = [
+    ['search_skills', 'Find shared skills you can see (yours, friends\', your organizations\', public) by words in their name, description or text.',
+      { query: str('words to look for; empty lists everything') }, [],
+      async (me, a) => (await call(me, 'GET', `/api/skills?q=${encodeURIComponent(a.query || '')}`)).skills.map(brief).join('\n') || 'No skills match.'],
+    ['read_skill', 'Read a skill: its SKILL.md (default) or another file in it.',
+      { skill: str('owner/name, like acme/handbook'), path: str('file inside the skill, default SKILL.md') }, ['skill'],
+      async (me, a) => (await call(me, 'GET', `/api/skills/${(await resolve(me, a.skill)).id}/file?path=${encodeURIComponent(a.path || 'SKILL.md')}`)).text],
+    ['skill_info', 'Who owns a skill, who can see it, whether it is required, its version history and open suggested changes.',
+      { skill: str('owner/name') }, ['skill'],
+      async (me, a) => {
+        const s = await resolve(me, a.skill), d = await call(me, 'GET', `/api/skills/${s.id}`);
+        const props = (await call(me, 'GET', `/api/proposals?skill=${s.id}`)).proposals;
+        return [brief(d.skill), `Files: ${d.files.map((f) => f.path).join(', ')}`,
+          `You can ${d.skill.can_edit ? 'edit it' : 'suggest changes to it'}${d.skill.can_manage ? ' and decide who gets it' : ''}.`,
+          'Versions:', ...d.versions.map((v) => `  v${v.version} by @${v.author} ${new Date(v.created).toISOString().slice(0, 10)} ${v.note}`),
+          ...(props.length ? ['Open suggestions:', ...props.map((p) => `  ${p.id} by @${p.author}: ${p.note}`)] : [])].join('\n');
+      }],
+    ['my_account', 'Who you are signed in as, your organizations and role in each (owner, admin, editor, member), friends, and the skills your machines get.',
+      {}, [],
+      async (me) => {
+        const m = await call(me, 'GET', '/api/me'), f = await call(me, 'GET', '/api/friends');
+        return [`@${m.user.handle} (${m.user.name}), key scope: ${me.scope}`,
+          `Organizations: ${m.orgs.map((o) => `${o.slug} (${o.role})`).join(', ') || 'none'}`,
+          `Friends: ${f.friends.map((u) => `@${u.handle}`).join(', ') || 'none'}`,
+          `Skills on your machines: ${manifest(me.id).map((s) => `${s.owner}/${s.name}`).join(', ')}`,
+          'Roles: editors change what organization skills say; admins also decide who gets them (required/optional, visibility) and manage people; members use skills and suggest changes.'].join('\n');
+      }],
+    ['publish_skill', 'Publish a new skill or a new version of one you can edit. Needs a write key. Members without edit rights should use suggest_change.',
+      { name: str('lowercase-name'), files: { type: 'object', additionalProperties: { type: 'string' }, description: 'path -> text; must include SKILL.md' },
+        org: str('organization id to publish under; omit for a personal skill'), visibility: str('private, friends or public (personal); org or public (organization)'),
+        required: { type: 'boolean', description: 'organization only: put it on every member\'s machines' }, note: str('what changed') }, ['name', 'files'],
+      async (me, a) => { const r = await call(me, 'POST', '/api/skills/push', { ...a, files: fileMap(a) }); return `${r.changed ? 'Published' : 'No changes to'} ${brief(r.skill)}`; }],
+    ['suggest_change', 'Suggest new files for a skill you cannot edit; an editor approves or declines it. Files you leave out stay as they are.',
+      { skill: str('owner/name'), files: { type: 'object', additionalProperties: { type: 'string' }, description: 'path -> new text' }, note: str('why') }, ['skill', 'files'],
+      async (me, a) => {
+        const s = await resolve(me, a.skill), cur = (await call(me, 'GET', `/api/skills/${s.id}/bundle`)).files;
+        const r = await call(me, 'POST', `/api/skills/${s.id}/proposals`, { files: { ...cur, ...fileMap(a) }, note: a.note });
+        return `Suggested change ${r.proposal.id} sent to the editors of ${r.proposal.skill}.`;
+      }],
+  ];
+  r('POST', '/api/mcp', false, async ({ me, body, res }) => {
+    const reply = (result) => ({ jsonrpc: '2.0', id: body.id, result });
+    if (body.id === undefined) { res.writeHead(202).end(); return undefined; } // notifications
+    if (body.method === 'initialize') return reply({ protocolVersion: body.params?.protocolVersion || '2025-06-18', capabilities: { tools: {} },
+      serverInfo: { name: 'skillnet', version: '1' }, instructions: 'Shared agent skills. Search and read skills, see who can change them, publish or suggest changes.' });
+    if (body.method === 'ping') return reply({});
+    if (body.method === 'tools/list') return reply({ tools: TOOLS.map(([name, description, properties, required]) => ({ name, description, inputSchema: { type: 'object', properties, required } })) });
+    if (body.method === 'tools/call') {
+      const tool = TOOLS.find((t) => t[0] === body.params?.name);
+      if (!tool) return { jsonrpc: '2.0', id: body.id, error: { code: -32602, message: `unknown tool ${body.params?.name}` } };
+      try { return reply({ content: [{ type: 'text', text: await tool[4](me, body.params.arguments || {}) }] }); }
+      catch (e) { if (!e.status) throw e; return reply({ content: [{ type: 'text', text: e.message }], isError: true }); }
+    }
+    return { jsonrpc: '2.0', id: body.id, error: { code: -32601, message: `unknown method ${body.method}` } };
   });
 
   function setCookie(res, token) {
@@ -413,6 +593,7 @@ echo "Done. Add ~/.local/bin to your PATH if 'skillnet' is not found."
     if (url.pathname === '/install.sh') return res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' }).end(installScript());
     const cli = /^\/cli\/(skillnet\.js|pi-skillnet-reload\.ts)$/.exec(url.pathname)?.[1];
     if (cli) return res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' }).end(fs.readFileSync(path.join(HERE, 'cli', cli)));
+    if (url.pathname === '/mcp') url.pathname = '/api/mcp';
     if (!url.pathname.startsWith('/api/')) return serveStatic(url, res);
     try {
       const route = routes.find(([m, re]) => m === req.method && re.test(url.pathname));
@@ -420,6 +601,7 @@ echo "Done. Add ~/.local/bin to your PATH if 'skillnet' is not found."
       const [, re, open, fn] = route;
       const me = auth(req);
       if (!open && !me) fail(401, 'sign in first');
+      if (me?.scope === 'read' && req.method !== 'GET' && url.pathname !== '/api/mcp') fail(403, 'this API key is read-only; make a write key to publish');
       let body = {};
       if (['POST', 'PATCH', 'DELETE'].includes(req.method)) {
         // JSON-only bodies: browsers cannot send these cross-site without a preflight, which blocks cookie-riding requests.
