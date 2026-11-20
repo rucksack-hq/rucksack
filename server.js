@@ -84,7 +84,7 @@ export function openDb(file) {
     `ALTER TABLE proposals ADD COLUMN branch TEXT`, `ALTER TABLE proposals ADD COLUMN commit_sha TEXT`,
     // Security hardening: email verification for per-user impersonation, and per-org wrapped data encryption keys.
     `ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0`, `ALTER TABLE users ADD COLUMN verify_token TEXT`,
-    `ALTER TABLE orgs ADD COLUMN dek TEXT`])
+    `ALTER TABLE orgs ADD COLUMN dek TEXT`, `ALTER TABLE users ADD COLUMN google_sub TEXT`])
     try { db.exec(sql); } catch (e) { if (!/duplicate column/.test(e.message)) throw e; }
   db.exec(ACCESS_SCHEMA);
   for (const sql of [`ALTER TABLE connections ADD COLUMN auth_type TEXT NOT NULL DEFAULT 'header'`,
@@ -168,7 +168,7 @@ export function stripeVerify(raw, header, secret, at = Date.now()) {
   return sigs.some((g) => g.length === want.length && crypto.timingSafeEqual(Buffer.from(g), Buffer.from(want)));
 }
 
-export function createApp({ db, baseUrl = '', billing = null, redirectHosts = [], gitDir = null, secretKey = null, allowPrivate = false }) {
+export function createApp({ db, baseUrl = '', billing = null, redirectHosts = [], gitDir = null, secretKey = null, allowPrivate = false, google = null }) {
   // billing: { stripe: (method, path, params) => Promise, price, webhookSecret, priceLabel } or null when Stripe is not set up.
   const all = (sql, p = {}) => db.prepare(sql).all(p);
   const one = (sql, p = {}) => db.prepare(sql).get(p);
@@ -338,6 +338,61 @@ export function createApp({ db, baseUrl = '', billing = null, redirectHosts = []
     run('UPDATE users SET email_verified=1, verify_token=NULL WHERE id=:id', { id: u.id });
     return { ok: true, email: u.email };
   });
+  // Sign in with Google: the only way an email becomes verified on its own (an admin can also vouch for a member).
+  // Google confirms the person owns the address, so Gmail and Calendar services may act as them.
+  const gExchange = google?.exchange || (async (code) => {
+    const r = await fetch('https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ code, client_id: google.clientId, client_secret: google.clientSecret, redirect_uri: `${baseUrl}/api/auth/google/callback`, grant_type: 'authorization_code' }) });
+    const d = await r.json();
+    if (!d.id_token) fail(400, 'Google sign-in failed');
+    // Straight from Google's token endpoint over TLS, so the signature need not be re-checked (OpenID Connect 3.1.3.7).
+    return JSON.parse(Buffer.from(d.id_token.split('.')[1], 'base64url').toString());
+  });
+  const back = (res, to) => { res.writeHead(302, { Location: to }).end(); };
+  r('GET', '/api/auth/google', PUBLIC_ROUTE, ({ query, res }) => {
+    if (!google) fail(404, 'Google sign-in is not set up');
+    const next = String(query.get('next') || '/');
+    const state = rid(18);
+    const secure = baseUrl.startsWith('https') ? '; Secure' : '';
+    res.setHeader('Set-Cookie', `gst=${state}.${Buffer.from(next.startsWith('/') && !next.startsWith('//') ? next : '/').toString('base64url')}; Path=/api/auth/google; Max-Age=600; HttpOnly; SameSite=Lax${secure}`);
+    back(res, 'https://accounts.google.com/o/oauth2/v2/auth?' + new URLSearchParams({ client_id: google.clientId, redirect_uri: `${baseUrl}/api/auth/google/callback`,
+      response_type: 'code', scope: 'openid email profile', state, prompt: 'select_account' }));
+  });
+  r('GET', '/api/auth/google/callback', PUBLIC_ROUTE, async ({ me, query, req, res }) => {
+    if (!google) fail(404, 'Google sign-in is not set up');
+    const [state, nextB64] = (/(?:^|;\s*)gst=([^;]+)/.exec(req.headers.cookie || '')?.[1] || '').split('.');
+    const next = nextB64 ? Buffer.from(nextB64, 'base64url').toString() : '/';
+    const oops = (why) => back(res, `/signin?error=${encodeURIComponent(why)}`);
+    if (!state || state !== query.get('state')) return oops('That sign-in link expired. Try again.');
+    if (!query.get('code')) return oops('Google sign-in was canceled.');
+    const id = await gExchange(query.get('code'));
+    if (id.aud !== google.clientId || !['accounts.google.com', 'https://accounts.google.com'].includes(id.iss)) return oops('Google sign-in failed.');
+    if (!id.email_verified) return oops('Google has not confirmed that email address.');
+    const email = String(id.email).toLowerCase();
+    let u = one('SELECT * FROM users WHERE google_sub=:s', { s: id.sub }) || one('SELECT * FROM users WHERE email=:e', { e: email });
+    if (me && u && u.id !== me.id) return oops(`${email} belongs to another Rucksack account.`);
+    if (me && !u) {
+      // Signed in already: switch this account to the address Google confirmed.
+      run('UPDATE users SET email=:e WHERE id=:id', { e: email, id: me.id });
+      u = me;
+    }
+    if (!u) {
+      let handle = email.split('@')[0].toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 30) || 'user';
+      if (!/^[a-z0-9]/.test(handle)) handle = `u${handle}`;
+      for (let base = handle, n = 2; one('SELECT 1 x FROM users WHERE handle=:h UNION SELECT 1 FROM orgs WHERE slug=:h', { h: handle }); n++) handle = `${base}${n}`;
+      u = { id: rid(9) };
+      run('INSERT INTO users(id,email,handle,name,pw,created,email_verified) VALUES(:id,:e,:h,:n,:p,:c,1)',
+        { id: u.id, e: email, h: handle, n: String(id.name || handle).slice(0, 80), p: hashPw(rid(24)), c: now() });
+    } else if (!u.email_verified && !me) {
+      // Someone made this account with a typed email nobody confirmed. Google says the real owner is here: lock the
+      // other person out (new password, every session and key ended) before handing it over.
+      run('UPDATE users SET pw=:p WHERE id=:id', { p: hashPw(rid(24)), id: u.id });
+      run('DELETE FROM tokens WHERE user_id=:id', { id: u.id });
+    }
+    run('UPDATE users SET email_verified=1, verify_token=NULL, google_sub=:s WHERE id=:id', { s: id.sub, id: u.id });
+    if (!me) setCookie(res, issueToken(u.id, 'web', 'browser'));
+    back(res, next);
+  });
   r('POST', '/api/login', PUBLIC_ROUTE, ({ body, res }) => {
     const u = one('SELECT * FROM users WHERE email=:e', { e: String(body.email || '').trim().toLowerCase() });
     if (!u || !checkPw(String(body.password || ''), u.pw)) fail(401, 'wrong email or password');
@@ -505,7 +560,7 @@ export function createApp({ db, baseUrl = '', billing = null, redirectHosts = []
     return { ok: true };
   });
 
-  r('GET', '/api/plans', PUBLIC_ROUTE, () => ({ free_seats: FREE_SEATS, team: billing?.priceLabel || '$8 per person a month', billing: !!billing }));
+  r('GET', '/api/plans', PUBLIC_ROUTE, () => ({ google: !!google, free_seats: FREE_SEATS, team: billing?.priceLabel || '$8 per person a month', billing: !!billing }));
   // Billing. Team is priced per person; Stripe holds the card and invoices, the webhook below sets the plan.
   const seats = (orgId) => one('SELECT count(*) n FROM members WHERE org_id=:o', { o: orgId }).n;
   const billingOrg = (slug, me) => {
@@ -1309,6 +1364,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     ? { stripe: stripeClient(e.STRIPE_KEY), price: e.STRIPE_PRICE, webhookSecret: e.STRIPE_WEBHOOK_SECRET, priceLabel: e.STRIPE_PRICE_LABEL || null } : null;
   const app = createApp({ db, baseUrl: e.SKILLNET_URL || `http://localhost:${port}`, billing, secretKey: e.SKILLNET_SECRET_KEY || null,
     gitDir: e.SKILLNET_GIT_DIR || path.join(path.dirname(e.SKILLNET_DB || path.join(HERE, 'data', 'x')), 'git'),
-    redirectHosts: (e.SKILLNET_REDIRECT_HOSTS || '').split(',').filter(Boolean) });
+    redirectHosts: (e.SKILLNET_REDIRECT_HOSTS || '').split(',').filter(Boolean),
+    google: e.GOOGLE_CLIENT_ID && e.GOOGLE_CLIENT_SECRET ? { clientId: e.GOOGLE_CLIENT_ID, clientSecret: e.GOOGLE_CLIENT_SECRET } : null });
   http.createServer(app.handle).listen(port, process.env.HOST || '127.0.0.1', () => console.log(`skillnet on :${port}`));
 }

@@ -427,10 +427,14 @@ function memberAccessView(slug, d, svc, member) {
     h('h1', { style: 'margin-top:16px' }, member.name),
     h('p', { class: 'lead' }, `@${member.handle}`, member.email ? ` — ${member.email}` : '', ' ',
       h('span', { class: `tag ${member.email_verified ? 'ok' : 'warn'}` }, member.email_verified ? 'Verified' : 'Unverified'),
-      admin && !member.email_verified && [' ', h('button', { onclick: act(async () => {
+      member.id === me.user.id && !member.email_verified && [' ', h('a', { class: 'btn primary', href: `/api/auth/google?next=${encodeURIComponent(location.pathname + location.search)}` }, 'Confirm with Google')],
+      admin && member.id !== me.user.id && !member.email_verified && [' ', h('button', { onclick: act(async () => {
         await api('POST', `/api/orgs/${slug}/members/${member.id}/verify`);
         toast('Email verified'); render();
       }) }, 'Verify email')]),
+    !member.email_verified && h('p', { class: 'muted' }, member.id === me.user.id
+      ? 'Gmail, Calendar and other services that act as you stay off until Google confirms this address is yours.'
+      : `Gmail, Calendar and other services that act as ${member.name} stay off until they sign in with Google once. Only tap Verify email if you know this address is theirs.`),
     h('div', { class: 'perm-grid' },
       h('div', {}, h('label', { for: 'm-role' }, 'Organization role'),
         owner ? h('select', { id: 'm-role', onchange: act(async (e) => {
@@ -493,7 +497,9 @@ const pages = {
   async signin() {
     const next = new URLSearchParams(location.search).get('next') || '/';
     let mode = new URLSearchParams(location.search).get('mode') === 'signup' ? 'signup' : 'signin';
-    const err = h('div', { class: 'err' });
+    const err = h('div', { class: 'err', role: 'alert' }, new URLSearchParams(location.search).get('error') || '');
+    const plans = await api('GET', '/api/plans').catch(() => ({}));
+    const googleBtn = plans.google && h('a', { class: 'btn primary google-btn', href: `/api/auth/google?next=${encodeURIComponent(next)}` }, 'Continue with Google');
     const draw = () => {
       const up = mode === 'signup';
       const form = h('form', { class: 'stack', onsubmit: act(async (e) => {
@@ -509,6 +515,7 @@ const pages = {
       fill(
         h('h1', {}, up ? 'Create your Rucksack account' : 'Sign in to Rucksack'),
         h('p', { class: 'lead' }, 'Share agent skills with friends and your organization. They sync to Claude Code, Pi, Codex and other agents on every machine you use.'),
+        googleBtn && [googleBtn, h('p', { class: 'muted or-line' }, up ? 'Or make an account with a password' : 'Or use your password')],
         form,
         h('p', {}, h('a', { href: '#', onclick: (e) => { e.preventDefault(); mode = up ? 'signin' : 'signup'; draw(); } }, up ? 'I already have an account' : 'Create an account')),
       );

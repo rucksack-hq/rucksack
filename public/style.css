@@ -59,6 +59,8 @@ td, th { text-align: left; padding: 8px; border-bottom: 1px solid var(--line); f
 th { color: var(--muted); }
 .muted { color: var(--muted); }
 .err { color: var(--warn); min-height: 1.5em; }
+.google-btn { display: block; text-align: center; padding: 12px; }
+.or-line { text-align: center; margin: 16px 0 8px; }
 .diff .add { color: var(--ok); background: color-mix(in oklch, var(--ok) 10%, transparent); display: block; }
 .diff .del { color: var(--warn); background: color-mix(in oklch, var(--warn) 10%, transparent); display: block; }
 .diff .gap { color: var(--muted); }
