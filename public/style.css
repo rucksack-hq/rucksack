@@ -159,3 +159,4 @@ main.wide { max-width: 1120px; padding-bottom: 0; }
   .thead .row > .grow { flex-basis: 100%; }
   .chat { gap: 12px; }
 }
+.chat .side > .row > .grow, .convo .row > .grow { flex-basis: auto; }
