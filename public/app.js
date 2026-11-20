@@ -365,6 +365,8 @@ function diffView(a, b) {
 }
 
 const LEVEL_HELP = { none: 'No access', read: 'Read only', ask: 'Read; changes wait for an admin', write: 'Read and change' };
+const AUTH_HELP = { header: 'Header / API key', oauth2_refresh_token: 'OAuth2 refresh token', oauth2_client_credentials: 'OAuth2 client credentials',
+  broker: 'Token broker', google_dwd: 'Google Workspace (per-user)', query_params: 'Query parameters' };
 
 // Shared services: the organization keeps an API key here; each person gets a level; agents call through Rucksack.
 function serviceSection(slug, d, svc, requests) {
@@ -378,14 +380,16 @@ function serviceSection(slug, d, svc, requests) {
   svc.levels.map((l) => h('option', { value: l, selected: p.set && p.level === l }, LEVEL_HELP[l])));
   const adder = () => {
     const f = { name: h('input', { placeholder: 'Name, like stripe', 'aria-label': 'Name' }), base_url: h('input', { placeholder: 'https://api.stripe.com/v1', 'aria-label': 'Base address' }),
-      auth_header: h('input', { placeholder: 'Authorization', 'aria-label': 'Header the key goes in' }), secret: h('input', { type: 'password', placeholder: 'Bearer sk_live_…', 'aria-label': 'Key', autocomplete: 'off' }),
+      auth_header: h('input', { placeholder: 'Authorization', 'aria-label': 'Header the key goes in' }), secret: h('input', { type: 'password', placeholder: 'Bearer sk_live_… (or JSON for OAuth / Google)', 'aria-label': 'Key', autocomplete: 'off' }),
+      config: h('input', { placeholder: 'Optional JSON config (token_url, scopes, extra_headers…)', 'aria-label': 'Config JSON' }),
       description: h('input', { placeholder: 'What it is for (agents read this)', 'aria-label': 'Description' }) };
+    const atype = h('select', { 'aria-label': 'Sign-in type' }, (svc.auth_types || ['header']).map((t) => h('option', { value: t }, AUTH_HELP[t] || t)));
     const lvl = h('select', { 'aria-label': 'Default access' }, svc.levels.map((l) => h('option', { value: l }, `Everyone: ${LEVEL_HELP[l].toLowerCase()}`)));
     const err = h('div', { class: 'err' });
-    return h('details', { class: 'card' }, h('summary', {}, 'Add a service'), h('div', { class: 'stack-gap' }, Object.values(f), lvl,
+    return h('details', { class: 'card' }, h('summary', {}, 'Add a service'), h('div', { class: 'stack-gap' }, f.name, f.base_url, atype, f.auth_header, f.secret, f.config, f.description, lvl,
       h('p', { class: 'muted' }, 'The key is stored encrypted and never shown again, to you or to any agent.'),
       h('button', { class: 'primary', onclick: act(async () => {
-        try { await api('POST', `/api/orgs/${slug}/connections`, { ...Object.fromEntries(Object.entries(f).map(([k, el]) => [k, el.value.trim() || undefined])), default_level: lvl.value }); toast('Added'); render(); }
+        try { await api('POST', `/api/orgs/${slug}/connections`, { ...Object.fromEntries(Object.entries(f).map(([k, el]) => [k, el.value.trim() || undefined])), auth_type: atype.value, default_level: lvl.value }); toast('Added'); render(); }
         catch (x) { err.textContent = x.message; }
       }) }, 'Add service'), err));
   };
@@ -396,7 +400,7 @@ function serviceSection(slug, d, svc, requests) {
         x.reason && h('div', {}, x.reason), x.body && h('details', {}, h('summary', {}, 'Body'), h('pre', {}, x.body))),
       h('button', { class: 'primary', onclick: decide(x, 'approve') }, 'Approve'), h('button', { onclick: decide(x, 'reject') }, 'Reject')))),
     h('div', { class: 'list' }, svc.connections.length ? svc.connections.map((c) => h('div', { class: 'card' },
-      h('div', { class: 'row' }, h('div', { class: 'grow' }, h('strong', {}, c.name), ` ${c.description}`, h('div', { class: 'muted' }, `${c.base_url}. You: ${LEVEL_HELP[c.my_level].toLowerCase()}.`)),
+      h('div', { class: 'row' }, h('div', { class: 'grow' }, h('strong', {}, c.name), ` ${c.description}`, h('div', { class: 'muted' }, `${c.base_url}${c.auth_type && c.auth_type !== 'header' ? ` (${AUTH_HELP[c.auth_type] || c.auth_type})` : ''}. You: ${LEVEL_HELP[c.my_level].toLowerCase()}.`)),
         admin && h('button', { class: 'danger', onclick: act(async () => { if (!confirm(`Remove ${c.name}? Agents lose it at once.`)) return; await api('DELETE', `/api/orgs/${slug}/connections/${c.name}`); render(); }) }, 'Remove')),
       admin && h('details', {}, h('summary', {}, 'Who may use it'), h('table', {}, c.people.map((p) => h('tr', {}, h('td', {}, p.name, ' ', h('span', { class: 'muted' }, `@${p.handle}`)), h('td', {}, levelPick(c, p)))))))) : h('p', { class: 'muted' }, 'No services yet.')),
     admin && adder(),

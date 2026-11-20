@@ -217,6 +217,107 @@ test('reviews, git and shared services', async (t) => {
     assert.equal((await as('dan', 'GET', '/api/orgs/acme/access-log')).requests.every((x) => x.by === 'dan'), true, 'members see only their own calls');
   });
 
+  await t.test('shared services: oauth2, broker, google_dwd, query_params, path allowlist, credit guard', async () => {
+    const crypto = await import('node:crypto');
+    const seen2 = [];
+    const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+    const privPem = privateKey.export({ type: 'pkcs8', format: 'pem' });
+    const mock = http.createServer(async (req, res) => {
+      const chunks = []; for await (const c of req) chunks.push(c);
+      const body = Buffer.concat(chunks).toString();
+      seen2.push({ method: req.method, url: req.url, headers: req.headers, body });
+      if (req.url === '/oauth/token') {
+        if (body.includes('grant_type=refresh_token')) return res.end(JSON.stringify({ access_token: 'ref-tok', expires_in: 3600 }));
+        if (body.includes('grant_type=client_credentials')) return res.end(JSON.stringify({ access_token: 'cc-tok', expires_in: 3600 }));
+        if (body.includes('jwt-bearer')) {
+          const assertion = new URLSearchParams(body).get('assertion');
+          const [h, p, s] = assertion.split('.');
+          const ok = crypto.createVerify('RSA-SHA256').update(`${h}.${p}`).verify(publicKey, s, 'base64url');
+          const claims = JSON.parse(Buffer.from(p, 'base64url').toString());
+          if (!ok) { res.statusCode = 401; return res.end('bad sig'); }
+          return res.end(JSON.stringify({ access_token: `g-${claims.sub}`, expires_in: 3600 }));
+        }
+      }
+      if (req.url === '/broker') return res.end(JSON.stringify({ access_token: 'brk-tok', realm_id: 'R123', expires_in_seconds: 600 }));
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ ok: true, url: req.url, auth: req.headers.authorization, hdr: req.headers }));
+    });
+    await new Promise((r) => mock.listen(0, '127.0.0.1', r));
+    const mBase = `http://127.0.0.1:${mock.address().port}`;
+    try {
+      // oauth2_refresh_token + extra_headers
+      await as('alice', 'POST', '/api/orgs/acme/connections', {
+        name: 'dbx', base_url: `${mBase}/api`, auth_type: 'oauth2_refresh_token',
+        secret: JSON.stringify({ client_id: 'cid', client_secret: 'csec', refresh_token: 'rtok' }),
+        config: { token_url: `${mBase}/oauth/token`, extra_headers: { 'X-Root': 'team' } }, default_level: 'write',
+      });
+      let r = await as('alice', 'POST', '/api/orgs/acme/connections/dbx/call', { method: 'POST', path: '/files/list', body: {} });
+      assert.equal(r.http, 200);
+      assert.equal(seen2.at(-1).headers.authorization, 'Bearer ref-tok');
+      assert.equal(seen2.at(-1).headers['x-root'], 'team');
+
+      // oauth2_client_credentials
+      await as('alice', 'POST', '/api/orgs/acme/connections', {
+        name: 'ramp', base_url: `${mBase}/api`, auth_type: 'oauth2_client_credentials',
+        secret: JSON.stringify({ client_id: 'rcid', client_secret: 'rcsec' }),
+        config: { token_url: `${mBase}/oauth/token`, scopes: 'transactions:read' }, default_level: 'read',
+      });
+      r = await as('alice', 'POST', '/api/orgs/acme/connections/ramp/call', { path: '/transactions' });
+      assert.equal(seen2.at(-1).headers.authorization, 'Bearer cc-tok');
+
+      // broker + path_template
+      await as('alice', 'POST', '/api/orgs/acme/connections', {
+        name: 'qbo', base_url: mBase, auth_type: 'broker', secret: 'brk-key',
+        config: { broker_url: `${mBase}/broker`, path_template: '/v3/company/{realm_id}{path}' }, default_level: 'read',
+      });
+      r = await as('alice', 'POST', '/api/orgs/acme/connections/qbo/call', { path: '/query?q=1' });
+      assert.equal(seen2.at(-1).url, '/v3/company/R123/query?q=1');
+      assert.equal(seen2.at(-1).headers.authorization, 'Bearer brk-tok');
+
+      // google_dwd: impersonates authenticated caller's email (alice@x)
+      await as('alice', 'POST', '/api/orgs/acme/connections', {
+        name: 'gmail', base_url: `${mBase}/gmail`, auth_type: 'google_dwd',
+        secret: JSON.stringify({ client_email: 'sa@proj.iam.gserviceaccount.com', private_key: privPem, token_uri: `${mBase}/oauth/token` }),
+        config: { scopes: ['https://mail.google.com/'] }, default_level: 'read',
+      });
+      r = await as('alice', 'POST', '/api/orgs/acme/connections/gmail/call', { path: '/messages' });
+      assert.equal(seen2.at(-1).headers.authorization, 'Bearer g-alice@x.com');
+
+      // query_params + secret precedence
+      await as('alice', 'POST', '/api/orgs/acme/connections', {
+        name: 'nc', base_url: `${mBase}/nc`, auth_type: 'query_params',
+        secret: JSON.stringify({ ApiKey: 'real-key', ApiUser: 'wbg' }),
+        config: { extra_params: { ClientIp: '1.2.3.4' } }, default_level: 'read',
+      });
+      r = await as('alice', 'POST', '/api/orgs/acme/connections/nc/call', { path: '/xml?Command=test&ApiKey=spoof' });
+      assert.match(seen2.at(-1).url, /ApiKey=real-key/);
+      assert.match(seen2.at(-1).url, /ClientIp=1\.2\.3\.4/);
+
+      // allowed_paths + param_headers + email_header
+      await as('alice', 'POST', '/api/orgs/acme/connections', {
+        name: 'scoped', base_url: mBase, auth_header: 'X-Key', secret: 'k1',
+        config: { allowed_paths: ['^/repos/wbg/[^/]+(/.*)?$'], param_headers: { prov: 'x-provider' }, email_header: 'X-Caller-Email' }, default_level: 'read',
+      });
+      assert.equal((await as('alice', 'POST', '/api/orgs/acme/connections/scoped/call', { path: '/repos/other/x' })).http, 403);
+      r = await as('alice', 'POST', '/api/orgs/acme/connections/scoped/call', { path: '/repos/wbg/app/issues?prov=GOOGLE' });
+      assert.equal(r.http, 200);
+      assert.equal(seen2.at(-1).headers['x-provider'], 'GOOGLE');
+      assert.equal(seen2.at(-1).headers['x-caller-email'], 'alice@x.com');
+      assert.ok(!seen2.at(-1).url.includes('prov='));
+
+      // credit_guard (apollo)
+      await as('alice', 'POST', '/api/orgs/acme/connections', {
+        name: 'apollo', base_url: `${mBase}/v1`, auth_header: 'X-Api-Key', secret: 'ak',
+        config: { credit_guard: 'apollo' }, default_level: 'write',
+      });
+      assert.equal((await as('alice', 'POST', '/api/orgs/acme/connections/apollo/call', { method: 'POST', path: '/people/match', body: { email: 'a@b.com' } })).http, 409);
+      r = await as('alice', 'POST', '/api/orgs/acme/connections/apollo/call', { method: 'POST', path: '/people/match', body: { email: 'a@b.com' }, confirm_credits: 1 });
+      assert.equal(r.http, 200);
+    } finally {
+      mock.close();
+    }
+  });
+
   await t.test('agents get the same through MCP tools', async () => {
     const mcp = async (name, args) => (await as('carol', 'POST', '/mcp', { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } },
       { Authorization: `Bearer ${keys.carol}`, Cookie: '' })).result.content[0].text;

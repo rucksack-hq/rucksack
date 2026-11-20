@@ -84,6 +84,9 @@ export function openDb(file) {
     `ALTER TABLE proposals ADD COLUMN branch TEXT`, `ALTER TABLE proposals ADD COLUMN commit_sha TEXT`])
     try { db.exec(sql); } catch (e) { if (!/duplicate column/.test(e.message)) throw e; }
   db.exec(ACCESS_SCHEMA);
+  for (const sql of [`ALTER TABLE connections ADD COLUMN auth_type TEXT NOT NULL DEFAULT 'header'`,
+    `ALTER TABLE connections ADD COLUMN config TEXT NOT NULL DEFAULT '{}'`])
+    try { db.exec(sql); } catch (e) { if (!/duplicate column/.test(e.message)) throw e; }
   return db;
 }
 
@@ -1025,10 +1028,11 @@ export function createApp({ db, baseUrl = '', billing = null, redirectHosts = []
       async (me) => access.mine(me.id).map((c) => `${c.org}/${c.name}: ${c.description || c.base_url} (base ${c.base_url}); you: ${c.my_level}`).join('\n') || 'No connected services.'],
     ['call_service', 'Call a connected service through Rucksack, which adds the key. Paths are relative to the service base address. Reads (GET) go through if you have read access; other methods need write, or wait for an admin with ask.',
       { service: str('org/name from list_services'), method: str('GET, POST, PUT, PATCH, DELETE'), path: str('path under the base address, with any ?query'),
-        body: { description: 'JSON body for POST, PUT, PATCH' }, reason: str('why, shown to the admin who approves it') }, ['service', 'path'],
+        body: { description: 'JSON body for POST, PUT, PATCH' }, reason: str('why, shown to the admin who approves it'),
+        confirm_credits: { type: 'number', description: 'credit cap confirmed by the user when a service asks for credit confirmation' } }, ['service', 'path'],
       async (me, a) => {
         const [org, name] = String(a.service).split('/');
-        const r = await call(me, 'POST', `/api/orgs/${org}/connections/${name}/call`, { method: a.method, path: a.path, body: a.body, reason: a.reason });
+        const r = await call(me, 'POST', `/api/orgs/${org}/connections/${name}/call`, { method: a.method, path: a.path, body: a.body, reason: a.reason, confirm_credits: a.confirm_credits });
         return r.status === 'waiting' ? `${r.message} Request id ${r.id}; check it later with check_service_request.` : `HTTP ${r.http}\n${r.result}`;
       }],
     ['check_service_request', 'See whether a service call that was waiting for approval went through, and its result.',
