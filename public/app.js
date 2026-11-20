@@ -64,13 +64,14 @@ function nav() {
 function skillRow(s, { onChange } = {}) {
   return h('div', { class: 'card skill row' },
     h('div', { class: 'grow' },
-      h('a', { class: 'name', href: `/s/${s.id}` }, `${s.owner}/${s.name}`),
+      h('a', { class: 'name', href: `/s/${s.id}` }, h('span', { class: 'owner' }, `${s.owner}/`), s.name),
       h('div', { class: 'desc' }, s.description || 'No description'),
     ),
-    h('span', { class: 'tag' }, VIS_LABEL[s.visibility]),
-    s.required && h('span', { class: 'tag req' }, 'Required'),
-    s.open_proposals > 0 && h('a', { class: 'tag req', href: `/s/${s.id}#suggestions` }, `${s.open_proposals} suggested`),
-    installButton(s, onChange),
+    h('div', { class: 'meta' },
+      h('span', { class: 'tag' }, VIS_LABEL[s.visibility]),
+      s.required && h('span', { class: 'tag req' }, 'Required'),
+      s.open_proposals > 0 && h('a', { class: 'tag req', href: `/s/${s.id}#suggestions` }, `${s.open_proposals} suggested`),
+      installButton(s, onChange)),
   );
 }
 function installButton(s, onChange) {
@@ -512,13 +513,13 @@ const pages = {
         h('label', { for: 'f-email' }, 'Email'), h('input', { id: 'f-email', name: 'email', type: 'email', required: true, autocomplete: 'email' }),
         h('label', { for: 'f-pw' }, 'Password'), h('input', { id: 'f-pw', name: 'password', type: 'password', required: true, minlength: 8, autocomplete: up ? 'new-password' : 'current-password' }),
         h('button', { class: 'primary' }, up ? 'Create account' : 'Sign in'), err);
-      fill(
+      fill(h('div', { class: 'auth' },
         h('h1', {}, up ? 'Create your Rucksack account' : 'Sign in to Rucksack'),
         h('p', { class: 'lead' }, 'Share agent skills with friends and your organization. They sync to Claude Code, Pi, Codex and other agents on every machine you use.'),
         googleBtn && [googleBtn, h('p', { class: 'muted or-line' }, up ? 'Or make an account with a password' : 'Or use your password')],
         form,
-        h('p', {}, h('a', { href: '#', onclick: (e) => { e.preventDefault(); mode = up ? 'signin' : 'signup'; draw(); } }, up ? 'I already have an account' : 'Create an account')),
-      );
+        h('p', { class: 'switch' }, h('a', { href: '#', onclick: (e) => { e.preventDefault(); mode = up ? 'signin' : 'signup'; draw(); } }, up ? 'I already have an account' : 'Create an account')),
+      ));
     };
     draw();
   },
@@ -599,7 +600,7 @@ const pages = {
       box.hidden = false; md.focus();
     });
     fill(
-      h('h1', {}, `${s.owner}/${s.name}`),
+      h('h1', {}, h('span', { class: 'owner' }, `${s.owner}/`), s.name),
       h('p', { class: 'lead' }, s.description || 'No description'),
       h('div', { class: 'row' }, h('span', { class: 'muted grow' }, `Version ${s.version}, updated ${when(s.updated)}`),
         s.required && h('span', { class: 'tag req' }, 'Required for the organization'),
@@ -713,7 +714,7 @@ const pages = {
           h('td', {}, h('div', { class: 'who' },
             h('strong', {}, m.name, ' ', h('span', { class: `tag ${m.email_verified ? 'ok' : 'warn'}` }, m.email_verified ? 'Verified' : 'Unverified')),
             h('span', { class: 'sub' }, `@${m.handle}${m.email ? ` — ${m.email}` : ''}`))),
-          h('td', {}, h('span', { class: 'tag' }, m.role)),
+          h('td', { class: 'role' }, m.role[0].toUpperCase() + m.role.slice(1)),
           admin && h('td', { class: 'hide-sm' }, `${svcCount(m.id)} of ${svc.connections?.length || 0}`),
           h('td', { class: 'act' }, admin ? h('a', { class: 'btn', href: `/o/${slug}?member=${m.id}` }, 'Set access')
             : m.id === me.user.id && h('button', { class: 'danger', onclick: act(async () => {
