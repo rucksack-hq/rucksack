@@ -81,7 +81,10 @@ export function openDb(file) {
     // Reviews: how many approvals a change to an organization skill needs (0 = editors publish directly). Change requests remember
     // the files they started from (for a three-way merge), and the git branch and commit they came from.
     `ALTER TABLE orgs ADD COLUMN review INTEGER NOT NULL DEFAULT 0`, `ALTER TABLE proposals ADD COLUMN base_bundle TEXT`,
-    `ALTER TABLE proposals ADD COLUMN branch TEXT`, `ALTER TABLE proposals ADD COLUMN commit_sha TEXT`])
+    `ALTER TABLE proposals ADD COLUMN branch TEXT`, `ALTER TABLE proposals ADD COLUMN commit_sha TEXT`,
+    // Security hardening: email verification for per-user impersonation, and per-org wrapped data encryption keys.
+    `ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0`, `ALTER TABLE users ADD COLUMN verify_token TEXT`,
+    `ALTER TABLE orgs ADD COLUMN dek TEXT`])
     try { db.exec(sql); } catch (e) { if (!/duplicate column/.test(e.message)) throw e; }
   db.exec(ACCESS_SCHEMA);
   for (const sql of [`ALTER TABLE connections ADD COLUMN auth_type TEXT NOT NULL DEFAULT 'header'`,
@@ -322,10 +325,18 @@ export function createApp({ db, baseUrl = '', billing = null, redirectHosts = []
     if (String(body.password || '').length < 8) fail(400, 'password must be at least 8 characters');
     if (one('SELECT 1 x FROM users WHERE email=:e OR handle=:h', { e: email, h: handle })) fail(409, 'that email or handle is taken');
     if (one('SELECT 1 x FROM orgs WHERE slug=:h', { h: handle })) fail(409, 'that handle is taken');
-    const id = rid(9);
-    run('INSERT INTO users VALUES(:id,:e,:h,:n,:p,:c)', { id, e: email, h: handle, n: String(body.name || handle).slice(0, 80), p: hashPw(body.password), c: now() });
+    const id = rid(9), vtok = rid(18);
+    run('INSERT INTO users(id,email,handle,name,pw,created,email_verified,verify_token) VALUES(:id,:e,:h,:n,:p,:c,0,:vt)',
+      { id, e: email, h: handle, n: String(body.name || handle).slice(0, 80), p: hashPw(body.password), c: now(), vt: vtok });
     setCookie(res, issueToken(id, 'web', 'browser'));
     return { user: userOut(one('SELECT * FROM users WHERE id=:id', { id })) };
+  });
+  r('POST', '/api/verify-email', PUBLIC_ROUTE, ({ body }) => {
+    const tok = String(body.token || '').trim();
+    if (!tok) fail(400, 'missing verification token');
+    const u = one('SELECT id, email FROM users WHERE verify_token=:t', { t: tok }) || fail(404, 'verification link is invalid or already used');
+    run('UPDATE users SET email_verified=1, verify_token=NULL WHERE id=:id', { id: u.id });
+    return { ok: true, email: u.email };
   });
   r('POST', '/api/login', PUBLIC_ROUTE, ({ body, res }) => {
     const u = one('SELECT * FROM users WHERE email=:e', { e: String(body.email || '').trim().toLowerCase() });
@@ -340,7 +351,7 @@ export function createApp({ db, baseUrl = '', billing = null, redirectHosts = []
     return { ok: true, me: me.id };
   });
   r('GET', '/api/me', false, ({ me }) => ({
-    user: userOut(me), email: me.email, chat_unread: chatList(me).reduce((n, c) => n + c.unread + c.waiting, 0),
+    user: userOut(me), email: me.email, email_verified: !!me.email_verified, chat_unread: chatList(me).reduce((n, c) => n + c.unread + c.waiting, 0),
     orgs: all('SELECT o.slug, o.name, m.role FROM members m JOIN orgs o ON o.id=m.org_id WHERE m.user_id=:u ORDER BY o.name', { u: me.id }),
   }));
 
@@ -446,7 +457,8 @@ export function createApp({ db, baseUrl = '', billing = null, redirectHosts = []
     return {
       org: { slug: o.slug, name: o.name, role: myRole, invite: ['owner', 'admin'].includes(myRole) ? `${baseUrl}/join?code=${o.invite}` : null,
         plan: o.plan, review: o.review, git: gitDir ? `${baseUrl}/git/${o.slug}.git` : null, free_seats: FREE_SEATS, billing: !!billing, price: billing?.priceLabel || null, can_bill: !!billing && ['owner', 'admin'].includes(myRole) },
-      members: all('SELECT u.id, u.handle, u.name, m.role FROM members m JOIN users u ON u.id=m.user_id WHERE m.org_id=:o ORDER BY u.handle', { o: o.id }),
+      members: all('SELECT u.id, u.handle, u.name, u.email, u.email_verified, m.role FROM members m JOIN users u ON u.id=m.user_id WHERE m.org_id=:o ORDER BY u.handle', { o: o.id })
+        .map((x) => ({ id: x.id, handle: x.handle, name: x.name, role: x.role, email_verified: !!x.email_verified, ...(['owner', 'admin'].includes(myRole) ? { email: x.email } : {}) })),
       skills: all(`SELECT ${SKILL_COLS} FROM ${SKILL_FROM} WHERE s.owner_org=:o ORDER BY s.name`, { o: o.id }).map((s) => pubSkill(s, me.id)),
     };
   });
@@ -465,6 +477,13 @@ export function createApp({ db, baseUrl = '', billing = null, redirectHosts = []
     syncSeats(o.id);
     notify([me.id]);
     return { org: { slug: o.slug, name: o.name } };
+  });
+  r('POST', '/api/orgs/([\\w-]+)/members/([\\w-]+)/verify', false, ({ me, m }) => {
+    const o = getOrg(m[1]);
+    if (!isAdmin(o.id, me.id)) fail(403, 'only admins can verify member emails');
+    if (!role(o.id, m[2])) fail(404, 'that person is not in the organization');
+    run('UPDATE users SET email_verified=1, verify_token=NULL WHERE id=:u', { u: m[2] });
+    return { ok: true };
   });
   r('POST', '/api/orgs/([\\w-]+)/members/([\\w-]+)', false, ({ me, m, body }) => {
     const o = getOrg(m[1]);

@@ -365,46 +365,131 @@ function diffView(a, b) {
 }
 
 const LEVEL_HELP = { none: 'No access', read: 'Read only', ask: 'Read; changes wait for an admin', write: 'Read and change' };
+const LEVEL_SHORT = { none: 'None', read: 'Read', ask: 'Ask', write: 'Write' };
 const AUTH_HELP = { header: 'Header / API key', oauth2_refresh_token: 'OAuth2 refresh token', oauth2_client_credentials: 'OAuth2 client credentials',
   broker: 'Token broker', google_dwd: 'Google Workspace (per-user)', query_params: 'Query parameters' };
 
-// Shared services: the organization keeps an API key here; each person gets a level; agents call through Rucksack.
+// Person-first permissions screen (mirrors Claude Gateway's clean per-user table).
+function memberAccessView(slug, d, svc, member) {
+  const o = d.org, admin = ['owner', 'admin'].includes(o.role), owner = o.role === 'owner';
+  const conns = svc.connections || [];
+  const levelFor = (c, uid) => c.people?.find((p) => p.id === uid)?.level || c.default_level;
+  const others = d.members.filter((m) => m.id !== member.id);
+  const tbody = h('tbody');
+  const filter = h('input', { class: 'perm-filter', type: 'search', placeholder: 'Filter services…', 'aria-label': 'Filter services' });
+
+  const drawRows = () => {
+    const q = filter.value.trim().toLowerCase();
+    const list = q ? conns.filter((c) => c.name.includes(q) || (c.description || '').toLowerCase().includes(q)) : conns;
+    tbody.replaceChildren(...(list.length ? list.map((c) => {
+      let cur = levelFor(c, member.id);
+      const seg = h('div', { class: 'perm-seg', role: 'group', 'aria-label': `Access to ${c.name}` });
+      const drawSeg = () => seg.replaceChildren(...svc.levels.map((l) => h('button', {
+        type: 'button', class: cur === l ? 'on' : null, 'aria-pressed': String(cur === l),
+        onclick: act(async () => {
+          if (cur === l) return;
+          cur = l;
+          drawSeg();
+          await api('PUT', `/api/orgs/${slug}/connections/${c.name}/access`, { user: member.id, level: l });
+          const p = c.people?.find((x) => x.id === member.id);
+          if (p) { p.level = l; p.set = true; }
+          toast(`${c.name}: ${LEVEL_SHORT[l]}`);
+        }),
+      }, LEVEL_SHORT[l])));
+      drawSeg();
+      return h('tr', {},
+        h('td', {}, h('div', { class: 'svc-name' }, c.name, c.auth_type && c.auth_type !== 'header' ? [' ', h('span', { class: 'tag' }, AUTH_HELP[c.auth_type] || c.auth_type)] : null),
+          c.description && h('div', { class: 'svc-desc' }, c.description)),
+        h('td', { class: 'lvl-cell' }, seg));
+    }) : [h('tr', {}, h('td', { colspan: 2, class: 'muted' }, 'No matching services.'))]));
+  };
+  filter.oninput = drawRows;
+  drawRows();
+
+  const copySelect = h('select', { 'aria-label': 'Copy service access from a teammate', onchange: act(async (e) => {
+    const srcId = e.target.value;
+    if (!srcId) return;
+    const levels = Object.fromEntries(conns.map((c) => [c.name, levelFor(c, srcId)]));
+    await api('PUT', `/api/orgs/${slug}/members/${member.id}/access`, { levels });
+    for (const c of conns) {
+      const p = c.people?.find((x) => x.id === member.id);
+      if (p) { p.level = levels[c.name]; p.set = true; }
+    }
+    e.target.value = '';
+    drawRows();
+    toast('Copied access from teammate');
+  }) },
+  h('option', { value: '' }, 'Copy access from a teammate…'),
+  others.map((m) => h('option', { value: m.id }, `${m.name} (@${m.handle})`)));
+
+  return [
+    h('div', { class: 'row' },
+      h('a', { class: 'btn', href: `/o/${slug}` }, `‹ ${o.name}`),
+      (admin || member.id === me.user.id) && h('button', { class: 'danger', onclick: act(async () => {
+        if (!confirm(`Remove ${member.name} from ${o.name}? They lose all services and org skills at once.`)) return;
+        await api('DELETE', `/api/orgs/${slug}/members/${member.id}`);
+        go(member.id === me.user.id ? '/orgs' : `/o/${slug}`);
+      }) }, member.id === me.user.id ? 'Leave' : 'Remove')),
+    h('h1', { style: 'margin-top:16px' }, member.name),
+    h('p', { class: 'lead' }, `@${member.handle}`, member.email ? ` — ${member.email}` : '', ' ',
+      h('span', { class: `tag ${member.email_verified ? 'ok' : 'warn'}` }, member.email_verified ? 'Verified' : 'Unverified'),
+      admin && !member.email_verified && [' ', h('button', { onclick: act(async () => {
+        await api('POST', `/api/orgs/${slug}/members/${member.id}/verify`);
+        toast('Email verified'); render();
+      }) }, 'Verify email')]),
+    h('div', { class: 'perm-grid' },
+      h('div', {}, h('label', { for: 'm-role' }, 'Organization role'),
+        owner ? h('select', { id: 'm-role', onchange: act(async (e) => {
+          await api('POST', `/api/orgs/${slug}/members/${member.id}`, { role: e.target.value }); toast('Role saved');
+        }) }, Object.keys(ROLE_HELP).map((r) => h('option', { value: r, selected: r === member.role }, `${r[0].toUpperCase() + r.slice(1)} — ${ROLE_HELP[r].toLowerCase()}`)))
+          : h('div', { class: 'card' }, member.role)),
+      others.length > 0 && h('div', {}, h('label', {}, 'Copy from teammate'), copySelect)),
+    h('h2', {}, `Services (${conns.length})`),
+    h('p', { class: 'muted' }, 'None = blocked. Read = look up data. Ask = reads pass, changes wait for an admin. Write = full access. Google services act only as this person.'),
+    conns.length > 6 && filter,
+    conns.length ? h('table', { class: 'perm-table' },
+      h('thead', {}, h('tr', {}, h('th', {}, 'Service'), h('th', { class: 'lvl-cell' }, 'Access'))),
+      tbody) : h('p', { class: 'muted' }, 'No shared services connected yet.'),
+  ];
+}
+
+// Shared services: compact admin table + approval queue + add form.
 function serviceSection(slug, d, svc, requests) {
   const admin = ['owner', 'admin'].includes(d.org.role);
   if (!svc.enabled) return h('p', { class: 'muted' }, 'Shared services are not switched on for this server yet.');
   const decide = (x, how) => act(async () => { await api('POST', `/api/access-requests/${x.id}/${how}`); toast(how === 'approve' ? 'Approved and sent' : 'Rejected'); render(); });
   const waiting = requests.filter((x) => x.status === 'waiting');
-  const levelPick = (c, p) => h('select', { 'aria-label': `Access for ${p.handle} to ${c.name}`, onchange: act(async (e) => {
-    await api('PUT', `/api/orgs/${slug}/connections/${c.name}/access`, { user: p.id, level: e.target.value === 'default' ? null : e.target.value }); toast('Saved'); }) },
-  h('option', { value: 'default', selected: !p.set }, `Default (${LEVEL_HELP[c.default_level].toLowerCase()})`),
-  svc.levels.map((l) => h('option', { value: l, selected: p.set && p.level === l }, LEVEL_HELP[l])));
   const adder = () => {
     const f = { name: h('input', { placeholder: 'Name, like stripe', 'aria-label': 'Name' }), base_url: h('input', { placeholder: 'https://api.stripe.com/v1', 'aria-label': 'Base address' }),
       auth_header: h('input', { placeholder: 'Authorization', 'aria-label': 'Header the key goes in' }), secret: h('input', { type: 'password', placeholder: 'Bearer sk_live_… (or JSON for OAuth / Google)', 'aria-label': 'Key', autocomplete: 'off' }),
-      config: h('input', { placeholder: 'Optional JSON config (token_url, scopes, extra_headers…)', 'aria-label': 'Config JSON' }),
+      config: h('input', { placeholder: 'Optional JSON config (token_url, scopes, allowed_domain…)', 'aria-label': 'Config JSON' }),
       description: h('input', { placeholder: 'What it is for (agents read this)', 'aria-label': 'Description' }) };
     const atype = h('select', { 'aria-label': 'Sign-in type' }, (svc.auth_types || ['header']).map((t) => h('option', { value: t }, AUTH_HELP[t] || t)));
     const lvl = h('select', { 'aria-label': 'Default access' }, svc.levels.map((l) => h('option', { value: l }, `Everyone: ${LEVEL_HELP[l].toLowerCase()}`)));
     const err = h('div', { class: 'err' });
-    return h('details', { class: 'card' }, h('summary', {}, 'Add a service'), h('div', { class: 'stack-gap' }, f.name, f.base_url, atype, f.auth_header, f.secret, f.config, f.description, lvl,
-      h('p', { class: 'muted' }, 'The key is stored encrypted and never shown again, to you or to any agent.'),
+    return h('details', { class: 'card', style: 'margin-top:12px' }, h('summary', {}, 'Add a service'), h('div', { class: 'stack-gap' }, f.name, f.base_url, atype, f.auth_header, f.secret, f.config, f.description, lvl,
+      h('p', { class: 'muted' }, 'The key is encrypted with this organization’s own key and never shown again.'),
       h('button', { class: 'primary', onclick: act(async () => {
         try { await api('POST', `/api/orgs/${slug}/connections`, { ...Object.fromEntries(Object.entries(f).map(([k, el]) => [k, el.value.trim() || undefined])), auth_type: atype.value, default_level: lvl.value }); toast('Added'); render(); }
         catch (x) { err.textContent = x.message; }
       }) }, 'Add service'), err));
   };
   return [
-    h('p', { class: 'muted' }, 'Keys for the tools your team uses stay here. Agents call them through Rucksack with the access each person has, and every call is logged.'),
-    admin && waiting.length > 0 && h('div', { class: 'list' }, waiting.map((x) => h('div', { class: 'card notice row' },
+    h('p', { class: 'muted' }, 'Keys stay encrypted here. Set who can use what in the Team table above; every call is logged.'),
+    admin && waiting.length > 0 && h('div', { class: 'list', style: 'margin-bottom:12px' }, waiting.map((x) => h('div', { class: 'card notice row' },
       h('div', { class: 'grow' }, h('strong', {}, `@${x.by}${x.agent ? '’s agent' : ''} wants to ${x.method} ${x.connection}${x.path ? `/${x.path.replace(/^\//, '')}` : ''}`),
         x.reason && h('div', {}, x.reason), x.body && h('details', {}, h('summary', {}, 'Body'), h('pre', {}, x.body))),
       h('button', { class: 'primary', onclick: decide(x, 'approve') }, 'Approve'), h('button', { onclick: decide(x, 'reject') }, 'Reject')))),
-    h('div', { class: 'list' }, svc.connections.length ? svc.connections.map((c) => h('div', { class: 'card' },
-      h('div', { class: 'row' }, h('div', { class: 'grow' }, h('strong', {}, c.name), ` ${c.description}`, h('div', { class: 'muted' }, `${c.base_url}${c.auth_type && c.auth_type !== 'header' ? ` (${AUTH_HELP[c.auth_type] || c.auth_type})` : ''}. You: ${LEVEL_HELP[c.my_level].toLowerCase()}.`)),
-        admin && h('button', { class: 'danger', onclick: act(async () => { if (!confirm(`Remove ${c.name}? Agents lose it at once.`)) return; await api('DELETE', `/api/orgs/${slug}/connections/${c.name}`); render(); }) }, 'Remove')),
-      admin && h('details', {}, h('summary', {}, 'Who may use it'), h('table', {}, c.people.map((p) => h('tr', {}, h('td', {}, p.name, ' ', h('span', { class: 'muted' }, `@${p.handle}`)), h('td', {}, levelPick(c, p)))))))) : h('p', { class: 'muted' }, 'No services yet.')),
+    svc.connections.length ? h('table', { class: 'team-table' },
+      h('thead', {}, h('tr', {}, h('th', {}, 'Service'), h('th', { class: 'hide-sm' }, 'Default'), h('th', {}, 'Your access'), admin && h('th', { class: 'act' }, ''))),
+      h('tbody', {}, svc.connections.map((c) => h('tr', {},
+        h('td', {}, h('div', { class: 'who' }, h('strong', {}, c.name, c.auth_type && c.auth_type !== 'header' ? [' ', h('span', { class: 'tag' }, AUTH_HELP[c.auth_type] || c.auth_type)] : null),
+          h('span', { class: 'sub' }, c.description || c.base_url))),
+        h('td', { class: 'hide-sm' }, h('span', { class: 'tag' }, LEVEL_SHORT[c.default_level] || c.default_level)),
+        h('td', {}, h('span', { class: 'tag' }, LEVEL_SHORT[c.my_level] || c.my_level)),
+        admin && h('td', { class: 'act' }, h('button', { class: 'danger', onclick: act(async () => { if (!confirm(`Remove ${c.name}? Agents lose it at once.`)) return; await api('DELETE', `/api/orgs/${slug}/connections/${c.name}`); render(); }) }, 'Remove')))))) : h('p', { class: 'muted' }, 'No services yet.'),
     admin && adder(),
-    requests.length > 0 && h('details', {}, h('summary', {}, admin ? 'Recent calls' : 'Your recent calls'), h('table', {}, requests.slice(0, 30).map((x) => h('tr', {},
+    requests.length > 0 && h('details', { style: 'margin-top:12px' }, h('summary', {}, admin ? 'Recent calls' : 'Your recent calls'), h('table', {}, requests.slice(0, 30).map((x) => h('tr', {},
       h('td', {}, when(x.created)), h('td', {}, `@${x.by}${x.agent ? ' (agent)' : ''}`), h('td', {}, h('code', {}, `${x.method} ${x.connection}/${x.path.replace(/^\//, '')}`)),
       h('td', {}, x.status === 'done' ? `${x.http}` : x.status))))),
   ];
@@ -597,8 +682,12 @@ const pages = {
   async org(slug) {
     const [d, svc, { requests }] = await Promise.all([api('GET', `/api/orgs/${slug}`), api('GET', `/api/orgs/${slug}/connections`),
       api('GET', `/api/orgs/${slug}/access-log`)]);
+    const o = d.org, admin = ['owner', 'admin'].includes(o.role);
+    const memberId = new URLSearchParams(location.search).get('member');
+    const selected = memberId && admin && d.members.find((m) => m.id === memberId);
+    if (selected) { fill(...memberAccessView(slug, d, svc, selected)); return; }
     const services = serviceSection(slug, d, svc, requests);
-    const o = d.org, admin = ['owner', 'admin'].includes(o.role), owner = o.role === 'owner';
+    const svcCount = (uid) => (svc.connections || []).filter((c) => (c.people?.find((p) => p.id === uid)?.level || c.default_level) !== 'none').length;
     if (new URLSearchParams(location.search).get('billing') === 'done') { history.replaceState(null, '', location.pathname); toast('Thanks. Your team plan starts as soon as Stripe confirms.'); }
     const openBilling = (kind) => act(async () => { location.href = (await api('POST', `/api/orgs/${slug}/billing/${kind}`)).url; });
     const team = o.plan === 'team';
@@ -615,6 +704,22 @@ const pages = {
           h('button', { onclick: act(async () => { await navigator.clipboard.writeText(o.invite); toast('Copied'); }) }, 'Copy'),
           h('button', { onclick: act(async () => { await api('POST', `/api/orgs/${slug}/invite`); toast('Old link no longer works'); render(); }) }, 'New link'))),
       plan,
+      h('h2', {}, 'Team and access'),
+      h('p', { class: 'muted' }, admin ? 'Open a person to set their role, verify their email, and pick what services they can reach in one table.' : Object.entries(ROLE_HELP).map(([r, t]) => `${r[0].toUpperCase() + r.slice(1)}: ${t.toLowerCase()}.`).join(' ')),
+      h('table', { class: 'team-table' },
+        h('thead', {}, h('tr', {}, h('th', {}, 'Person'), h('th', {}, 'Role'), admin && h('th', { class: 'hide-sm' }, 'Services'), h('th', { class: 'act' }, ''))),
+        h('tbody', {}, d.members.map((m) => h('tr', {},
+          h('td', {}, h('div', { class: 'who' },
+            h('strong', {}, m.name, ' ', h('span', { class: `tag ${m.email_verified ? 'ok' : 'warn'}` }, m.email_verified ? 'Verified' : 'Unverified')),
+            h('span', { class: 'sub' }, `@${m.handle}${m.email ? ` — ${m.email}` : ''}`))),
+          h('td', {}, h('span', { class: 'tag' }, m.role)),
+          admin && h('td', { class: 'hide-sm' }, svc.connections?.length ? `${svcCount(m.id)} of ${svc.connections.length}` : '0'),
+          h('td', { class: 'act' }, admin ? h('a', { class: 'btn', href: `/o/${slug}?member=${m.id}` }, 'Access')
+            : m.id === me.user.id && h('button', { class: 'danger', onclick: act(async () => {
+              await api('DELETE', `/api/orgs/${slug}/members/${m.id}`); go('/orgs');
+            }) }, 'Leave')))))),
+      h('h2', {}, 'Shared services'),
+      services,
       h('h2', {}, 'Skills'),
       h('div', { class: 'list' }, d.skills.length ? d.skills.map((s) => skillRow(s)) : h('p', { class: 'muted' }, 'No skills yet.')),
       h('h2', {}, 'Changes and history'),
@@ -629,18 +734,6 @@ const pages = {
           h('p', { class: 'muted' }, ['Sign in with your handle and an API key from ', h('a', { href: '/devices' }, 'Keys and devices'), ' as the password. ',
             o.review || !['owner', 'admin', 'editor'].includes(o.role) ? 'Push a branch (git push origin HEAD:my-change): each skill it changes becomes a change request.'
               : 'Editors push to main to publish; anyone can push a branch to ask for review.'])]),
-      h('h2', {}, 'Shared services'),
-      services,
-      h('h2', {}, 'Members'),
-      h('p', { class: 'muted' }, Object.entries(ROLE_HELP).map(([r, t]) => `${r[0].toUpperCase() + r.slice(1)}: ${t.toLowerCase()}.`).join(' ')),
-      h('table', {}, d.members.map((m) => h('tr', {},
-        h('td', {}, m.name, ' ', h('span', { class: 'muted' }, `@${m.handle}`)),
-        h('td', {}, owner ? h('select', { 'aria-label': `Role for ${m.handle}`, onchange: act(async (e) => { await api('POST', `/api/orgs/${slug}/members/${m.id}`, { role: e.target.value }); toast('Role saved'); }) },
-          Object.keys(ROLE_HELP).map((r) => h('option', { value: r, selected: r === m.role }, r))) : m.role),
-        h('td', {}, (admin || m.id === me.user.id) && h('button', { class: 'danger', onclick: act(async () => {
-          await api('DELETE', `/api/orgs/${slug}/members/${m.id}`);
-          if (m.id === me.user.id) go('/orgs'); else render();
-        }) }, m.id === me.user.id ? 'Leave' : 'Remove'))))),
     );
   },
 

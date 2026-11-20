@@ -236,3 +236,37 @@ button.ghost:hover, button.ghost[aria-expanded="true"] { background: var(--soft)
 .plan .btn { align-self: start; }
 .inline { display: flex; gap: 8px; align-items: center; }
 .plan-bar { margin-top: 12px; }
+/* Team & permissions table (Claude-Gateway-style person-first matrix) */
+.tag.ok { color: var(--ok); border-color: var(--ok); }
+.tag.warn { color: var(--warn); border-color: var(--warn); }
+.team-table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--line); border-radius: var(--r); overflow: hidden; }
+.team-table th, .team-table td { padding: 12px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.team-table tr:last-child td { border-bottom: 0; }
+.team-table .who { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.team-table .who strong { color: var(--ink); font-weight: 600; }
+.team-table .who .sub { font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
+.team-table .act { text-align: right; white-space: nowrap; }
+.perm-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 12px 0 20px; }
+.perm-filter { margin: 8px 0 12px; max-width: 320px; }
+.perm-table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--line); border-radius: var(--r); overflow: hidden; }
+.perm-table th, .perm-table td { padding: 12px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.perm-table tr:last-child td { border-bottom: 0; }
+.perm-table .svc-name { font-weight: 600; color: var(--ink); }
+.perm-table .svc-desc { font-size: 13px; color: var(--muted); margin-top: 4px; overflow-wrap: anywhere; }
+.perm-table .lvl-cell { text-align: right; white-space: nowrap; }
+.perm-seg { display: inline-flex; border: 1px solid var(--line); border-radius: var(--r); overflow: hidden; background: var(--card); }
+.perm-seg button { border: 0; border-radius: 0; padding: 8px 12px; font-size: 13px; color: var(--muted); background: transparent; }
+.perm-seg button + button { border-left: 1px solid var(--line); }
+.perm-seg button.on { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
+@media (max-width: 620px) {
+  .perm-grid { grid-template-columns: minmax(0, 1fr); }
+  .team-table .hide-sm { display: none; }
+  .perm-table, .perm-table tbody, .perm-table tr, .perm-table td { display: block; width: 100%; }
+  .perm-table thead { display: none; }
+  .perm-table tr { padding: 12px; border-bottom: 1px solid var(--line); }
+  .perm-table tr:last-child { border-bottom: 0; }
+  .perm-table td { padding: 0; border: 0; }
+  .perm-table .lvl-cell { text-align: left; margin-top: 8px; }
+  .perm-seg { display: flex; width: 100%; }
+  .perm-seg button { flex: 1; padding: 8px 4px; text-align: center; }
+}

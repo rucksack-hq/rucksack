@@ -53,16 +53,29 @@ function apolloEstimate(pathname, body) {
 export function accessApi({ r, one, all, run, getOrg, role, isAdmin, rid, now, fail, secretKey, allowPrivate, emit }) {
   const key = secretKey && crypto.createHash('sha256').update(secretKey).digest();
   const need = () => key || fail(503, 'shared tool access is not set up on this server');
-  const seal = (text) => {
-    const iv = crypto.randomBytes(12), c = crypto.createCipheriv('aes-256-gcm', need(), iv);
-    const enc = Buffer.concat([c.update(text, 'utf8'), c.final()]);
+  const encWith = (k, buf) => {
+    const iv = crypto.randomBytes(12), c = crypto.createCipheriv('aes-256-gcm', k, iv);
+    const enc = Buffer.concat([c.update(buf), c.final()]);
     return [iv, c.getAuthTag(), enc].map((b) => b.toString('base64')).join('.');
   };
-  const open = (sealed) => {
+  const decWith = (k, sealed) => {
     const [iv, tag, enc] = sealed.split('.').map((s) => Buffer.from(s, 'base64'));
-    const d = crypto.createDecipheriv('aes-256-gcm', need(), iv); d.setAuthTag(tag);
-    return Buffer.concat([d.update(enc), d.final()]).toString('utf8');
+    const d = crypto.createDecipheriv('aes-256-gcm', k, iv); d.setAuthTag(tag);
+    return Buffer.concat([d.update(enc), d.final()]);
   };
+  // Envelope encryption: each organization gets its own random 256-bit DEK, wrapped by the server master key.
+  const orgKey = (orgId) => {
+    const master = need();
+    const row = one('SELECT dek FROM orgs WHERE id=:o', { o: orgId });
+    if (row?.dek) return decWith(master, row.dek);
+    const dek = crypto.randomBytes(32);
+    run('UPDATE orgs SET dek=:d WHERE id=:o', { d: encWith(master, dek), o: orgId });
+    return dek;
+  };
+  const seal = (orgId, text) => `v2:${encWith(orgKey(orgId), Buffer.from(text, 'utf8'))}`;
+  const open = (orgId, sealed) => sealed.startsWith('v2:')
+    ? decWith(orgKey(orgId), sealed.slice(3)).toString('utf8')
+    : decWith(need(), sealed).toString('utf8');
   const checkUrl = (raw, label) => {
     let u;
     try { u = new URL(String(raw || '')); } catch { fail(400, `${label} must be a full address like https://api.example.com/v1`); }
@@ -124,6 +137,11 @@ export function accessApi({ r, one, all, run, getOrg, role, isAdmin, rid, now, f
       if (!sc.length) fail(400, 'config.scopes is required for google_dwd');
       out.scopes = sc;
     }
+    if (cfg.allowed_domain) {
+      const dom = String(cfg.allowed_domain).trim().toLowerCase().replace(/^@/, '');
+      if (!/^[a-z0-9.-]+\.[a-z]{2,}$/.test(dom)) fail(400, 'bad allowed_domain');
+      out.allowed_domain = dom;
+    }
     if (cfg.credit_guard) {
       if (cfg.credit_guard !== 'apollo') fail(400, 'credit_guard must be "apollo"');
       out.credit_guard = 'apollo';
@@ -174,7 +192,7 @@ export function accessApi({ r, one, all, run, getOrg, role, isAdmin, rid, now, f
       if (authType === 'google_dwd' && (!parsed.client_email || !parsed.private_key)) fail(400, 'google_dwd secret needs client_email and private_key');
     }
     const v = { o: o.id, n: name, d: String(body.description || '').slice(0, 500), b: base.href.replace(/\/$/, ''), h: header, l: level,
-      s: secretVal ? seal(secretVal) : old.secret, t: now(), at: authType, cfg: JSON.stringify(cfg) };
+      s: secretVal ? seal(o.id, secretVal) : old.secret, t: now(), at: authType, cfg: JSON.stringify(cfg) };
     if (old) {
       run('UPDATE connections SET description=:d, base_url=:b, auth_header=:h, default_level=:l, secret=:s, auth_type=:at, config=:cfg WHERE org_id=:o AND name=:n', v);
       clearCache(old.id);
@@ -200,10 +218,33 @@ export function accessApi({ r, one, all, run, getOrg, role, isAdmin, rid, now, f
     else run('INSERT OR REPLACE INTO access VALUES(:c,:u,:l)', { c: c.id, u: body.user, l: body.level });
     return { connection: pub(c, me.id, true) };
   });
+  // Batch update one person's service levels (used by the per-person permissions table and "copy from teammate").
+  r('PUT', '/api/orgs/([\\w-]+)/members/([\\w-]+)/access', false, ({ me, m, body }) => {
+    const o = getOrg(m[1]), uid = m[2];
+    if (!isAdmin(o.id, me.id)) fail(403, 'only admins decide who may use a connection');
+    if (!role(o.id, uid)) fail(400, 'that person is not in the organization');
+    const levels = body?.levels;
+    if (!levels || typeof levels !== 'object' || Array.isArray(levels)) fail(400, 'levels must be an object');
+    for (const [name, lvl] of Object.entries(levels)) {
+      const c = one('SELECT * FROM connections WHERE org_id=:o AND name=:n', { o: o.id, n: name });
+      if (!c) continue;
+      if (lvl === null) run('DELETE FROM access WHERE connection_id=:c AND user_id=:u', { c: c.id, u: uid });
+      else if (!LEVELS.includes(lvl)) fail(400, `level must be one of ${LEVELS.join(', ')}`);
+      else run('INSERT OR REPLACE INTO access VALUES(:c,:u,:l)', { c: c.id, u: uid, l: lvl });
+    }
+    return { ok: true };
+  });
 
-  async function resolveAuth(c, cfg, callerEmail) {
+  const requireVerifiedEmail = (cfg, callerEmail, callerVerified) => {
+    if (!callerEmail) fail(403, 'this service needs your account email');
+    if (!callerVerified) fail(403, 'verify your email before using this service');
+    if (cfg.allowed_domain && !callerEmail.toLowerCase().endsWith(`@${cfg.allowed_domain}`))
+      fail(403, `this service requires an @${cfg.allowed_domain} email`);
+  };
+
+  async function resolveAuth(c, cfg, callerEmail, callerVerified) {
     const type = c.auth_type || 'header';
-    const raw = open(c.secret);
+    const raw = open(c.org_id, c.secret);
     if (type === 'header') return { headers: { [c.auth_header]: raw } };
     if (type === 'query_params') return { params: { ...(cfg.extra_params || {}), ...JSON.parse(raw) } };
     const hit = (k) => { const x = tokCache.get(k); return x && x.exp > now() + 60e3 ? x : null; };
@@ -245,7 +286,7 @@ export function accessApi({ r, one, all, run, getOrg, role, isAdmin, rid, now, f
       return { headers: { Authorization: `Bearer ${d.access_token}` }, realm: d.realm_id || '' };
     }
     if (type === 'google_dwd') {
-      if (!callerEmail) fail(403, 'this service needs your account email');
+      requireVerifiedEmail(cfg, callerEmail, callerVerified);
       const ck = `${c.id}\0${callerEmail.toLowerCase()}`;
       const cached = hit(ck);
       if (cached) return { headers: { Authorization: `Bearer ${cached.token}` } };
@@ -265,7 +306,7 @@ export function accessApi({ r, one, all, run, getOrg, role, isAdmin, rid, now, f
     fail(500, `unknown auth_type ${type}`);
   }
 
-  async function send(c, method, p, body, callerEmail) {
+  async function send(c, method, p, body, callerEmail, callerVerified) {
     const cfg = readCfg(c);
     const rawPath = String(p || '');
     if (cfg.allowed_paths?.length) {
@@ -275,7 +316,7 @@ export function accessApi({ r, one, all, run, getOrg, role, isAdmin, rid, now, f
       const norm = '/' + pathOnly.replace(/^\/+/, '');
       if (!cfg.allowed_paths.some((re) => new RegExp(re).test(norm))) fail(403, `path ${norm} is not allowed for ${c.name}`);
     }
-    const auth = await resolveAuth(c, cfg, callerEmail);
+    const auth = await resolveAuth(c, cfg, callerEmail, callerVerified);
     let targetPath = rawPath;
     if (cfg.path_template) {
       const [po, qs] = rawPath.split('?');
@@ -294,7 +335,7 @@ export function accessApi({ r, one, all, run, getOrg, role, isAdmin, rid, now, f
       }
     }
     if (cfg.email_header) {
-      if (!callerEmail) fail(403, 'this service needs your account email');
+      requireVerifiedEmail(cfg, callerEmail, callerVerified);
       headers[cfg.email_header] = callerEmail;
     }
     Object.assign(headers, auth.headers || {});
@@ -309,7 +350,7 @@ export function accessApi({ r, one, all, run, getOrg, role, isAdmin, rid, now, f
   }
   const logOut = (x) => ({ id: x.id, connection: x.cname, by: x.handle, agent: !!x.agent, method: x.method, path: x.path, reason: x.reason, status: x.status,
     http: x.http, result: x.result, body: x.body, decided_by: x.decider, created: x.created, decided: x.decided });
-  const LOG_SQL = `SELECT l.*, c.name cname, c.org_id, u.handle, u.email uemail, d.handle decider FROM access_log l JOIN connections c ON c.id=l.connection_id
+  const LOG_SQL = `SELECT l.*, c.name cname, c.org_id, u.handle, u.email uemail, u.email_verified uverified, d.handle decider FROM access_log l JOIN connections c ON c.id=l.connection_id
     JOIN users u ON u.id=l.user_id LEFT JOIN users d ON d.id=l.decided_by`;
 
   // Every call is logged, whether it went through, waited for approval or was refused.
@@ -339,7 +380,7 @@ export function accessApi({ r, one, all, run, getOrg, role, isAdmin, rid, now, f
       emit(admins(o.id), 'access', () => ({ id: entry.id }));
       return { id: entry.id, status: 'waiting', message: `Waiting for an admin of ${o.slug} to approve ${method} ${entry.p}.` };
     }
-    const out = await send(c, method, entry.p, body.body, me.email);
+    const out = await send(c, method, entry.p, body.body, me.email, !!me.email_verified);
     log('done', out.http, out.result);
     return { id: entry.id, status: 'done', ...out };
   });
@@ -366,7 +407,7 @@ export function accessApi({ r, one, all, run, getOrg, role, isAdmin, rid, now, f
     if (x.status !== 'waiting') fail(409, `that request is already ${x.status}`);
     run(`UPDATE access_log SET status='sending', decided_by=:u, decided=:t WHERE id=:id AND status='waiting'`, { id: x.id, u: me.id, t: now() });
     let out = { http: null, result: null }, status = 'rejected';
-    if (m[2] === 'approve') { out = await send(one('SELECT * FROM connections WHERE id=:c', { c: x.connection_id }), x.method, x.path, x.body, x.uemail); status = 'done'; }
+    if (m[2] === 'approve') { out = await send(one('SELECT * FROM connections WHERE id=:c', { c: x.connection_id }), x.method, x.path, x.body, x.uemail, !!x.uverified); status = 'done'; }
     run('UPDATE access_log SET status=:s, http=:h, result=:r WHERE id=:id', { id: x.id, s: status, h: out.http, r: out.result });
     emit([x.user_id], 'access', () => ({ id: x.id }));
     return { request: logOut(entryOf(x.id, me)) };

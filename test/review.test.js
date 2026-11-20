@@ -274,14 +274,25 @@ test('reviews, git and shared services', async (t) => {
       assert.equal(seen2.at(-1).url, '/v3/company/R123/query?q=1');
       assert.equal(seen2.at(-1).headers.authorization, 'Bearer brk-tok');
 
-      // google_dwd: impersonates authenticated caller's email (alice@x)
+      // google_dwd: requires verified email and allowed_domain; impersonates authenticated caller's email (alice@x.com)
       await as('alice', 'POST', '/api/orgs/acme/connections', {
         name: 'gmail', base_url: `${mBase}/gmail`, auth_type: 'google_dwd',
         secret: JSON.stringify({ client_email: 'sa@proj.iam.gserviceaccount.com', private_key: privPem, token_uri: `${mBase}/oauth/token` }),
-        config: { scopes: ['https://mail.google.com/'] }, default_level: 'read',
+        config: { scopes: ['https://mail.google.com/'], allowed_domain: 'x.com' }, default_level: 'read',
       });
+      // Unverified email is blocked from google_dwd
+      assert.equal((await as('alice', 'POST', '/api/orgs/acme/connections/gmail/call', { path: '/messages' })).http, 403);
+      // Admin verifies alice's email; now google_dwd succeeds and per-org DEK (v2:) is in use
+      await as('alice', 'POST', `/api/orgs/acme/members/${ids.alice}/verify`);
       r = await as('alice', 'POST', '/api/orgs/acme/connections/gmail/call', { path: '/messages' });
       assert.equal(seen2.at(-1).headers.authorization, 'Bearer g-alice@x.com');
+      assert.ok(db.prepare('SELECT dek FROM orgs WHERE slug=?').get('acme').dek, 'per-org DEK stored');
+      assert.ok(db.prepare('SELECT secret FROM connections WHERE name=?').get('gmail').secret.startsWith('v2:'), 'secret uses org DEK');
+
+      // Batch per-person access update
+      await as('alice', 'PUT', `/api/orgs/acme/members/${ids.dan}/access`, { levels: { dbx: 'read', ramp: 'none' } });
+      assert.equal((await as('dan', 'POST', '/api/orgs/acme/connections/dbx/call', { method: 'GET', path: '/files' })).http, 200);
+      assert.equal((await as('dan', 'POST', '/api/orgs/acme/connections/ramp/call', { method: 'GET', path: '/transactions' })).http, 403);
 
       // query_params + secret precedence
       await as('alice', 'POST', '/api/orgs/acme/connections', {
