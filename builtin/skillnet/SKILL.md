@@ -10,7 +10,7 @@ Answer the user's questions yourself with the commands below; do not send them t
 
 ## Pick the way in
 
-1. Rucksack connector tools available (search_skills, read_skill, skill_info, my_account, publish_skill, suggest_change, list_conversations, read_conversation, send_message): use them. This is the usual way in.
+1. Rucksack connector tools available (search_skills, read_skill, skill_info, my_account, publish_skill, suggest_change, list_changes, review_change, list_services, call_service, check_service_request, list_conversations, read_conversation, send_message): use them. This is the usual way in.
 2. `skillnet` command on PATH: use it (add `--json` to any command for exact data).
 3. No command but `SKILLNET_KEY` is set (cloud runs): run it without installing:
    `curl -fsSL {{URL}}/cli/skillnet.js -o /tmp/skillnet.js && node /tmp/skillnet.js <command>`
@@ -43,6 +43,11 @@ Not signed in: `skillnet login {{URL}}` prints a link and code; tell the user to
 - Required for the whole organization: `skillnet require owner/name`; back to optional: `skillnet optional owner/name`.
 - Roll back: `skillnet rollback owner/name <version>`.
 - Keys for cloud runs: `skillnet key create "Cursor cloud" [--write]`.
+
+Organizations can require one or two other editors to approve each change; then a push from an editor also becomes a change request. Approving merges it with any newer changes; if both touched the same file, the author updates the request first.
+Each organization is also a git repository (`git clone {{URL}}/git/<org>.git`, an API key as the password): one folder per skill, every version a commit. Pushing a branch opens a change request for each skill it changes; editors push to main only when no approval is required.
+
+Shared services: an organization can keep an API key in Rucksack (`list_services`, `call_service`). The user's level decides what goes through: read is GET only, ask sends changes to an admin first (`check_service_request` later), write goes straight through. Say why in `reason`. Never ask anyone for the key.
 
 Roles in an organization: **members** use skills and suggest changes; **editors** also change what skills say;
 **admins** also decide who gets them (required, visibility, delete) and manage people; **owners** also change roles.

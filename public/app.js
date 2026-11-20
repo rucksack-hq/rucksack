@@ -11,7 +11,7 @@ function h(tag, attrs = {}, ...kids) {
     else if (k === 'class') el.className = v;
     else el.setAttribute(k, v === true ? '' : v);
   }
-  for (const k of kids.flat()) if (k != null && k !== false) el.append(k.nodeType ? k : String(k));
+  for (const k of kids.flat(Infinity)) if (k != null && k !== false) el.append(k.nodeType ? k : String(k));
   return el;
 }
 async function api(method, path, body) {
@@ -349,6 +349,63 @@ async function pricing() {
     h('p', { class: 'fine' }, 'Team is billed monthly by card through Stripe. When someone joins or leaves, the next bill adjusts. Cancel any time from the billing page.')));
 }
 
+// Line diff (longest common subsequence), for reviewing changes. Removed lines are marked -, added +.
+function diffView(a, b) {
+  const x = a.split('\n'), y = b.split('\n'), n = x.length, m = y.length;
+  if (n * m > 4e6) return h('pre', {}, b);
+  const L = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1));
+  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) L[i][j] = x[i] === y[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+  const out = [];
+  for (let i = 0, j = 0; i < n || j < m;) {
+    if (i < n && j < m && x[i] === y[j]) { out.push(['same', x[i]]); i++; j++; } else if (j < m && (i >= n || L[i][j + 1] >= L[i + 1][j])) out.push(['add', y[j++]]); else out.push(['del', x[i++]]);
+  }
+  // Keep three lines of context around each change.
+  const keep = out.map((_, k) => out.slice(Math.max(0, k - 3), k + 4).some(([t]) => t !== 'same'));
+  return h('pre', { class: 'diff' }, out.map(([t, line], k) => (keep[k] ? h('span', { class: t }, `${t === 'add' ? '+' : t === 'del' ? '-' : ' '} ${line}\n`) : keep[k - 1] ? h('span', { class: 'gap' }, '…\n') : null)));
+}
+
+const LEVEL_HELP = { none: 'No access', read: 'Read only', ask: 'Read; changes wait for an admin', write: 'Read and change' };
+
+// Shared services: the organization keeps an API key here; each person gets a level; agents call through Rucksack.
+function serviceSection(slug, d, svc, requests) {
+  const admin = ['owner', 'admin'].includes(d.org.role);
+  if (!svc.enabled) return h('p', { class: 'muted' }, 'Shared services are not switched on for this server yet.');
+  const decide = (x, how) => act(async () => { await api('POST', `/api/access-requests/${x.id}/${how}`); toast(how === 'approve' ? 'Approved and sent' : 'Rejected'); render(); });
+  const waiting = requests.filter((x) => x.status === 'waiting');
+  const levelPick = (c, p) => h('select', { 'aria-label': `Access for ${p.handle} to ${c.name}`, onchange: act(async (e) => {
+    await api('PUT', `/api/orgs/${slug}/connections/${c.name}/access`, { user: p.id, level: e.target.value === 'default' ? null : e.target.value }); toast('Saved'); }) },
+  h('option', { value: 'default', selected: !p.set }, `Default (${LEVEL_HELP[c.default_level].toLowerCase()})`),
+  svc.levels.map((l) => h('option', { value: l, selected: p.set && p.level === l }, LEVEL_HELP[l])));
+  const adder = () => {
+    const f = { name: h('input', { placeholder: 'Name, like stripe', 'aria-label': 'Name' }), base_url: h('input', { placeholder: 'https://api.stripe.com/v1', 'aria-label': 'Base address' }),
+      auth_header: h('input', { placeholder: 'Authorization', 'aria-label': 'Header the key goes in' }), secret: h('input', { type: 'password', placeholder: 'Bearer sk_live_…', 'aria-label': 'Key', autocomplete: 'off' }),
+      description: h('input', { placeholder: 'What it is for (agents read this)', 'aria-label': 'Description' }) };
+    const lvl = h('select', { 'aria-label': 'Default access' }, svc.levels.map((l) => h('option', { value: l }, `Everyone: ${LEVEL_HELP[l].toLowerCase()}`)));
+    const err = h('div', { class: 'err' });
+    return h('details', { class: 'card' }, h('summary', {}, 'Add a service'), h('div', { class: 'stack-gap' }, Object.values(f), lvl,
+      h('p', { class: 'muted' }, 'The key is stored encrypted and never shown again, to you or to any agent.'),
+      h('button', { class: 'primary', onclick: act(async () => {
+        try { await api('POST', `/api/orgs/${slug}/connections`, { ...Object.fromEntries(Object.entries(f).map(([k, el]) => [k, el.value.trim() || undefined])), default_level: lvl.value }); toast('Added'); render(); }
+        catch (x) { err.textContent = x.message; }
+      }) }, 'Add service'), err));
+  };
+  return [
+    h('p', { class: 'muted' }, 'Keys for the tools your team uses stay here. Agents call them through Rucksack with the access each person has, and every call is logged.'),
+    admin && waiting.length > 0 && h('div', { class: 'list' }, waiting.map((x) => h('div', { class: 'card notice row' },
+      h('div', { class: 'grow' }, h('strong', {}, `@${x.by}${x.agent ? '’s agent' : ''} wants to ${x.method} ${x.connection}${x.path ? `/${x.path.replace(/^\//, '')}` : ''}`),
+        x.reason && h('div', {}, x.reason), x.body && h('details', {}, h('summary', {}, 'Body'), h('pre', {}, x.body))),
+      h('button', { class: 'primary', onclick: decide(x, 'approve') }, 'Approve'), h('button', { onclick: decide(x, 'reject') }, 'Reject')))),
+    h('div', { class: 'list' }, svc.connections.length ? svc.connections.map((c) => h('div', { class: 'card' },
+      h('div', { class: 'row' }, h('div', { class: 'grow' }, h('strong', {}, c.name), ` ${c.description}`, h('div', { class: 'muted' }, `${c.base_url}. You: ${LEVEL_HELP[c.my_level].toLowerCase()}.`)),
+        admin && h('button', { class: 'danger', onclick: act(async () => { if (!confirm(`Remove ${c.name}? Agents lose it at once.`)) return; await api('DELETE', `/api/orgs/${slug}/connections/${c.name}`); render(); }) }, 'Remove')),
+      admin && h('details', {}, h('summary', {}, 'Who may use it'), h('table', {}, c.people.map((p) => h('tr', {}, h('td', {}, p.name, ' ', h('span', { class: 'muted' }, `@${p.handle}`)), h('td', {}, levelPick(c, p)))))))) : h('p', { class: 'muted' }, 'No services yet.')),
+    admin && adder(),
+    requests.length > 0 && h('details', {}, h('summary', {}, admin ? 'Recent calls' : 'Your recent calls'), h('table', {}, requests.slice(0, 30).map((x) => h('tr', {},
+      h('td', {}, when(x.created)), h('td', {}, `@${x.by}${x.agent ? ' (agent)' : ''}`), h('td', {}, h('code', {}, `${x.method} ${x.connection}/${x.path.replace(/^\//, '')}`)),
+      h('td', {}, x.status === 'done' ? `${x.http}` : x.status))))),
+  ];
+}
+
 const pages = {
   async signin() {
     const next = new URLSearchParams(location.search).get('next') || '/';
@@ -388,7 +445,7 @@ const pages = {
         review.map((p, i) => [i ? ', ' : '', h('a', { href: `/s/${p.skill_id}#suggestions` }, p.skill)])),
       h('div', { class: 'list' }, mine.skills.filter((s) => mineIds.has(s.id)).map((s) => skillRow(s)),
         mineIds.size <= 1 && h('p', { class: 'muted' }, 'Nothing yet. Add skills from Browse, or make a new one.')),
-      h('p', { class: 'muted' }, 'Every machine also gets the skillnet skill, so you can ask your agent things like “which skills does Acme require?” or “suggest a fix to acme/handbook”.'),
+      h('p', { class: 'muted' }, 'Every machine also gets the Rucksack guide skill, so you can ask your agent things like “which skills does Acme require?” or “suggest a fix to acme/handbook”.'),
       skills.length <= 1 && h('p', {}, h('a', { href: '/connect' }, 'Connect your first agent')),
       own.length > 0 && [h('h2', {}, 'Published by you'), h('div', { class: 'list' }, own.map((s) => skillRow(s)))],
     );
@@ -440,7 +497,10 @@ const pages = {
         h('button', { class: 'primary', onclick: act(async () => {
           const next = { ...files, 'SKILL.md': b64(md.value) };
           try {
-            if (s.can_edit) { await api('POST', '/api/skills/push', { org: isOrg ? s.owner : undefined, name: s.name, files: next, note: note.value }); toast('Saved; machines update in seconds'); }
+            if (s.can_edit) {
+              const r = await api('POST', '/api/skills/push', { org: isOrg ? s.owner : undefined, name: s.name, files: next, note: note.value });
+              toast(r.proposal ? `Sent for review: it needs ${r.proposal.needs} approval${r.proposal.needs > 1 ? 's' : ''} from another editor` : 'Saved; machines update in seconds');
+            }
             else { await api('POST', `/api/skills/${s.id}/proposals`, { files: next, note: note.value }); toast('Sent to the editors'); }
             render();
           } catch (x) { err.textContent = x.message; }
@@ -455,12 +515,19 @@ const pages = {
         s.required && h('span', { class: 'tag req' }, 'Required for the organization'),
         h('button', { onclick: openBox }, s.can_edit ? 'Edit' : 'Suggest a change'), installButton(s)),
       box,
-      proposals.length > 0 && [h('h2', { id: 'suggestions' }, 'Suggested changes'), h('div', { class: 'list' }, proposals.map((p) => h('div', { class: 'card' },
+      s.version === 0 && h('p', { class: 'card notice' }, 'Not published yet: this new skill reaches people once its change request below is approved.'),
+      proposals.length > 0 && [h('h2', { id: 'suggestions' }, 'Changes waiting for review'), h('div', { class: 'list' }, proposals.map((p) => h('div', { class: 'card' },
         h('div', { class: 'row' }, h('div', { class: 'grow' }, h('strong', {}, `@${p.author}`), ` ${p.note || '(no note)'}`,
-          h('div', { class: 'muted' }, `${when(p.created)}, based on version ${p.base_version}${p.base_version !== s.version ? `; it is now version ${s.version}, so approving replaces the newer changes` : ''}`)),
-          p.can_approve && h('button', { class: 'primary', onclick: act(async () => { await api('POST', `/api/proposals/${p.id}/approve`); toast('Approved; machines update in seconds'); render(); }) }, 'Approve'),
-          h('button', { onclick: act(async () => { await api('POST', `/api/proposals/${p.id}/decline`); render(); }) }, p.can_approve ? 'Decline' : 'Withdraw')),
-        h('details', {}, h('summary', {}, 'Proposed SKILL.md'), h('pre', {}, p.skill_md)))))],
+          h('div', { class: 'muted' }, [`${when(p.created)}${p.branch ? `, from git branch ${p.branch}` : ''}. Changes ${p.changed.join(', ')}. `,
+            `Approved by ${p.approvals.length ? p.approvals.map((x) => `@${x}`).join(', ') : 'nobody yet'} (${p.approvals.length} of ${p.needs} needed).`,
+            p.base_version !== s.version && !p.conflicts.length ? ` Started from version ${p.base_version}; the newer changes are kept.` : '']),
+          p.conflicts.length > 0 && h('div', { class: 'err' }, `Version ${s.version} also changed ${p.conflicts.join(', ')}. @${p.author} needs to update this request before it can merge.`)),
+          p.can_approve && !p.conflicts.length && h('button', { class: 'primary', onclick: act(async () => {
+            const r = await api('POST', `/api/proposals/${p.id}/approve`);
+            toast(r.merged ? 'Approved and published; machines update in seconds' : `Approved; ${r.needs - r.approvals} more needed`); render();
+          }) }, 'Approve'),
+          (p.can_close) && h('button', { onclick: act(async () => { await api('POST', `/api/proposals/${p.id}/decline`); render(); }) }, p.mine ? 'Withdraw' : 'Decline')),
+        h('details', {}, h('summary', {}, 'What changed in SKILL.md'), diffView(p.base_md, p.skill_md)))))],
       s.can_manage && h('div', { class: 'card', style: 'margin-top:16px' },
         h('label', {}, 'Who can see it'),
         h('div', { class: 'seg' }, (isOrg ? ['org', 'public'] : ['private', 'friends', 'public']).map((v) =>
@@ -524,7 +591,9 @@ const pages = {
   },
 
   async org(slug) {
-    const d = await api('GET', `/api/orgs/${slug}`);
+    const [d, svc, { requests }] = await Promise.all([api('GET', `/api/orgs/${slug}`), api('GET', `/api/orgs/${slug}/connections`),
+      api('GET', `/api/orgs/${slug}/access-log`)]);
+    const services = serviceSection(slug, d, svc, requests);
     const o = d.org, admin = ['owner', 'admin'].includes(o.role), owner = o.role === 'owner';
     if (new URLSearchParams(location.search).get('billing') === 'done') { history.replaceState(null, '', location.pathname); toast('Thanks. Your team plan starts as soon as Stripe confirms.'); }
     const openBilling = (kind) => act(async () => { location.href = (await api('POST', `/api/orgs/${slug}/billing/${kind}`)).url; });
@@ -544,6 +613,20 @@ const pages = {
       plan,
       h('h2', {}, 'Skills'),
       h('div', { class: 'list' }, d.skills.length ? d.skills.map((s) => skillRow(s)) : h('p', { class: 'muted' }, 'No skills yet.')),
+      h('h2', {}, 'Changes and history'),
+      h('div', { class: 'card stack-gap' },
+        h('label', {}, 'Before a change reaches everyone'),
+        admin ? h('div', { class: 'seg' }, [[0, 'Editors publish directly'], [1, '1 other editor approves'], [2, '2 approve']].map(([n, t]) =>
+          h('button', { class: o.review === n ? 'on' : null, onclick: act(async () => { await api('POST', `/api/orgs/${slug}/settings`, { review: n }); toast('Saved'); render(); }) }, t)))
+          : h('p', {}, o.review ? `${o.review} other editor${o.review > 1 ? 's' : ''} approve${o.review > 1 ? '' : 's'} every change.` : 'Editors publish directly; members suggest changes.'),
+        h('p', { class: 'muted' }, o.review ? 'Editors and members send change requests; editors and admins approve them here, on each skill page, or by asking their agent.'
+          : 'Members send change requests; an editor or admin approves them.'),
+        o.git && [h('label', {}, 'Git repository (one folder per skill; every version is a commit)'), snippet(`git clone ${o.git}`),
+          h('p', { class: 'muted' }, ['Sign in with your handle and an API key from ', h('a', { href: '/devices' }, 'Keys and devices'), ' as the password. ',
+            o.review || !['owner', 'admin', 'editor'].includes(o.role) ? 'Push a branch (git push origin HEAD:my-change): each skill it changes becomes a change request.'
+              : 'Editors push to main to publish; anyone can push a branch to ask for review.'])]),
+      h('h2', {}, 'Shared services'),
+      services,
       h('h2', {}, 'Members'),
       h('p', { class: 'muted' }, Object.entries(ROLE_HELP).map(([r, t]) => `${r[0].toUpperCase() + r.slice(1)}: ${t.toLowerCase()}.`).join(' ')),
       h('table', {}, d.members.map((m) => h('tr', {},

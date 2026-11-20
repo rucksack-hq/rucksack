@@ -28,6 +28,8 @@ p.lead { color: var(--muted); margin-top: -8px; }
 .list { display: grid; gap: 8px; }
 .row { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
 .row > .grow { flex: 1; min-width: 0; }
+.row:has(> h1) { margin-bottom: 16px; }
+.row > h1 { margin-bottom: 0; }
 .skill .name { font-weight: 600; color: var(--ink); text-decoration: none; }
 .skill .desc { color: var(--muted); font-size: 14px; margin-top: 2px; overflow-wrap: anywhere; }
 .tag { font-size: 13px; color: var(--muted); border: 1px solid var(--line); border-radius: var(--r); padding: 1px 6px; white-space: nowrap; }
@@ -57,6 +59,9 @@ td, th { text-align: left; padding: 8px; border-bottom: 1px solid var(--line); f
 th { color: var(--muted); }
 .muted { color: var(--muted); }
 .err { color: var(--warn); min-height: 1.5em; }
+.diff .add { color: var(--ok); background: color-mix(in oklch, var(--ok) 10%, transparent); display: block; }
+.diff .del { color: var(--warn); background: color-mix(in oklch, var(--warn) 10%, transparent); display: block; }
+.diff .gap { color: var(--muted); }
 .seg { display: inline-flex; border: 1px solid var(--line); border-radius: var(--r); overflow: hidden; }
 .seg button { border: 0; border-radius: 0; border-right: 1px solid var(--line); }
 .seg button:last-child { border-right: 0; }

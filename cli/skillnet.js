@@ -183,7 +183,8 @@ async function push(dir, flags) {
   // Mark the folder as the published copy so sync treats it as yours and never deletes it.
   const mk = readJson(path.join(dir, MARKER), {});
   fs.writeFileSync(path.join(dir, MARKER), JSON.stringify({ ...mk, id: s.id, owner: s.owner, name: s.name, hash: s.hash, version: s.version, server: conf().server, source: mk.source ?? !mk.id }, null, 2));
-  log(`${out.changed ? 'published' : 'no changes to'} ${s.owner}/${s.name} v${s.version} (${s.visibility}${s.required ? ', required' : ''})`);
+  if (out.proposal) log(`sent ${s.owner}/${s.name} for review: needs ${out.proposal.needs} approval${out.proposal.needs > 1 ? 's' : ''} (${out.proposal.id})`);
+  else log(`${out.changed ? 'published' : 'no changes to'} ${s.owner}/${s.name} v${s.version} (${s.visibility}${s.required ? ', required' : ''})`);
 }
 
 const findSkill = async (ref) => (await api('GET', `/api/resolve?ref=${encodeURIComponent(ref)}`)).skill;

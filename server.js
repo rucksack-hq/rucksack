@@ -6,6 +6,8 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { gitMirror } from './git.js';
+import { accessApi, ACCESS_SCHEMA } from './access.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(HERE, 'public');
@@ -66,14 +68,21 @@ export function openDb(file) {
     CREATE INDEX IF NOT EXISTS messages_convo ON messages(convo_id, created);
     CREATE TABLE IF NOT EXISTS grants(owner TEXT NOT NULL REFERENCES users ON DELETE CASCADE, other TEXT NOT NULL, dir TEXT NOT NULL,
       kind TEXT NOT NULL, mode TEXT NOT NULL, PRIMARY KEY(owner,other,dir,kind));
+    CREATE TABLE IF NOT EXISTS approvals(proposal_id TEXT NOT NULL REFERENCES proposals ON DELETE CASCADE, user_id TEXT NOT NULL REFERENCES users ON DELETE CASCADE,
+      created INTEGER NOT NULL, PRIMARY KEY(proposal_id,user_id));
   `);
   // Columns added after the first release.
   for (const sql of [`ALTER TABLE tokens ADD COLUMN scope TEXT NOT NULL DEFAULT 'write'`, `ALTER TABLE skills ADD COLUMN body TEXT NOT NULL DEFAULT ''`,
     // Connector sign-ins (OAuth): a 'connector' row is the long-lived grant holding the refresh token; its short 'oauth' access tokens point at it.
     `ALTER TABLE tokens ADD COLUMN expires INTEGER`, `ALTER TABLE tokens ADD COLUMN grant_id TEXT`, `ALTER TABLE tokens ADD COLUMN client TEXT`,
     // Billing: 'free' or 'team'; the Stripe customer and subscription of a paid organization.
-    `ALTER TABLE orgs ADD COLUMN plan TEXT NOT NULL DEFAULT 'free'`, `ALTER TABLE orgs ADD COLUMN stripe_customer TEXT`, `ALTER TABLE orgs ADD COLUMN stripe_sub TEXT`])
+    `ALTER TABLE orgs ADD COLUMN plan TEXT NOT NULL DEFAULT 'free'`, `ALTER TABLE orgs ADD COLUMN stripe_customer TEXT`, `ALTER TABLE orgs ADD COLUMN stripe_sub TEXT`,
+    // Reviews: how many approvals a change to an organization skill needs (0 = editors publish directly). Change requests remember
+    // the files they started from (for a three-way merge), and the git branch and commit they came from.
+    `ALTER TABLE orgs ADD COLUMN review INTEGER NOT NULL DEFAULT 0`, `ALTER TABLE proposals ADD COLUMN base_bundle TEXT`,
+    `ALTER TABLE proposals ADD COLUMN branch TEXT`, `ALTER TABLE proposals ADD COLUMN commit_sha TEXT`])
     try { db.exec(sql); } catch (e) { if (!/duplicate column/.test(e.message)) throw e; }
+  db.exec(ACCESS_SCHEMA);
   return db;
 }
 
@@ -101,6 +110,16 @@ export function checkFiles(files) {
       fail(400, `bad file path: ${p}`);
     if (typeof files[p] !== 'string') fail(400, `file ${p} must be base64 text`);
   }
+}
+// Three-way merge by file: a file both sides changed differently is a conflict.
+export function merge3(base, mine, cur) {
+  const files = {}, conflicts = [];
+  for (const p of new Set([...Object.keys(base), ...Object.keys(mine), ...Object.keys(cur)])) {
+    const b = base[p], m = mine[p], c = cur[p];
+    const v = m === c ? m : m === b ? c : c === b ? m : (conflicts.push(p), m);
+    if (v !== undefined) files[p] = v;
+  }
+  return { files, conflicts };
 }
 export const bundleHash = (files) => sha(Object.keys(files).sort().map((p) => `${p}\0${files[p]}`).join('\0'));
 
@@ -142,7 +161,7 @@ export function stripeVerify(raw, header, secret, at = Date.now()) {
   return sigs.some((g) => g.length === want.length && crypto.timingSafeEqual(Buffer.from(g), Buffer.from(want)));
 }
 
-export function createApp({ db, baseUrl = '', billing = null, redirectHosts = [] }) {
+export function createApp({ db, baseUrl = '', billing = null, redirectHosts = [], gitDir = null, secretKey = null, allowPrivate = false }) {
   // billing: { stripe: (method, path, params) => Promise, price, webhookSecret, priceLabel } or null when Stripe is not set up.
   const all = (sql, p = {}) => db.prepare(sql).all(p);
   const one = (sql, p = {}) => db.prepare(sql).get(p);
@@ -203,8 +222,30 @@ export function createApp({ db, baseUrl = '', billing = null, redirectHosts = []
     return row || null;
   }
 
+  // Other parts (git mirror) listen for published and deleted skills.
+  const hooks = { publish: [], remove: [] };
+  const reviewsNeeded = (s) => (s.owner_org ? one('SELECT review FROM orgs WHERE id=:o', { o: s.owner_org }).review : 0);
+  const versionFiles = (skillId, v) => JSON.parse(one('SELECT bundle FROM versions WHERE skill_id=:s AND version=:v', { s: skillId, v })?.bundle || '{}');
+  // A change request. With a branch, a newer push to the same branch replaces it and its approvals start over.
+  function propose(me, s, files, { note = '', branch = null, commit = null, baseFiles = null } = {}) {
+    checkFiles(files);
+    if (bundleHash(files) === s.hash) fail(400, 'that is the same as the current version');
+    const base = JSON.stringify(baseFiles || versionFiles(s.id, s.version));
+    const old = branch && one(`SELECT id FROM proposals WHERE skill_id=:s AND branch=:b AND status='open'`, { s: s.id, b: branch });
+    const id = old?.id || rid(9);
+    if (old) {
+      run('UPDATE proposals SET bundle=:b, note=:n, base_bundle=:bb, base_version=:v, commit_sha=:c, user_id=:u, created=:t WHERE id=:id',
+        { id, b: JSON.stringify(files), n: String(note).slice(0, 2000), bb: base, v: s.version, c: commit, u: me.id, t: now() });
+      run('DELETE FROM approvals WHERE proposal_id=:id', { id });
+    } else run(`INSERT INTO proposals(id,skill_id,user_id,base_version,bundle,note,created,base_bundle,branch,commit_sha) VALUES(:id,:s,:u,:v,:b,:n,:t,:bb,:br,:c)`,
+      { id, s: s.id, u: me.id, v: s.version, b: JSON.stringify(files), n: String(note).slice(0, 2000), t: now(), bb: base, br: branch, c: commit });
+    return { id, skill: `${s.owner}/${s.name}`, skill_id: s.id, status: 'open', needs: Math.max(reviewsNeeded(s), 1) };
+  }
+
   // Publish files as a new version. `author` is who wrote the change (the proposer when an editor approves one).
-  function pushSkill(me, b, author = me.id) {
+  // opts.direct skips the organization's review rule (used when an approved change request is merged); opts.fromGit means the
+  // files arrived in a git push to main, so the mirror must not write its own commit for them; opts.merge is that branch commit.
+  function pushSkill(me, b, author = me.id, opts = {}) {
     checkFiles(b.files);
     const size = Object.values(b.files).reduce((n, v) => n + v.length, 0);
     if (size > MAX_BUNDLE) fail(413, 'skill is larger than 5 MB');
@@ -224,6 +265,18 @@ export function createApp({ db, baseUrl = '', billing = null, redirectHosts = []
       fail(403, 'only admins decide who gets an organization skill (visibility, required)');
     const body = md.slice(0, 100e3);
     const hash = bundleHash(b.files);
+    if (org?.review > 0 && !opts.direct && hash !== s?.hash) {
+      // Reviewed organization: the change waits for approval. A new skill starts as a draft (version 0) that nobody gets yet.
+      if (!s) {
+        const id = rid(9);
+        run('INSERT INTO skills(id,owner_user,owner_org,name,description,visibility,required,updated) VALUES(:id,NULL,:oo,:n,:d,:v,:r,:t)',
+          { id, oo: org.id, n: name, d: description, v: visibility, r: required ? 1 : 0, t: now() });
+        run('INSERT OR IGNORE INTO installs VALUES(:u,:s)', { u: me.id, s: id });
+      }
+      s = one(`SELECT ${SKILL_COLS} FROM ${SKILL_FROM} WHERE coalesce(s.owner_user, s.owner_org)=:o AND s.name=:n`, { o: org.id, n: name });
+      const proposal = propose(me, s, b.files, { note: b.note || '', branch: b.branch || null, commit: b.commit || null });
+      return { skill: pubSkill(s, me.id), changed: false, proposal };
+    }
     db.exec('BEGIN');
     try {
       if (!s) {
@@ -243,6 +296,7 @@ export function createApp({ db, baseUrl = '', billing = null, redirectHosts = []
         { d: description, v: visibility, r: required ? 1 : 0, body, s: s.id });
       db.exec('COMMIT');
       s = one(`SELECT ${SKILL_COLS} FROM ${SKILL_FROM} WHERE s.id=:id`, { id: s.id });
+      if (changed && !opts.fromGit) for (const f of hooks.publish) f(s, b.files, author, String(b.note || ''), opts.merge);
       notify(audience(s));
       return { skill: pubSkill(s, me.id), changed };
     } catch (e) { db.exec('ROLLBACK'); throw e; }
@@ -383,7 +437,7 @@ export function createApp({ db, baseUrl = '', billing = null, redirectHosts = []
     const myRole = role(o.id, me.id) || fail(404, 'no such organization');
     return {
       org: { slug: o.slug, name: o.name, role: myRole, invite: ['owner', 'admin'].includes(myRole) ? `${baseUrl}/join?code=${o.invite}` : null,
-        plan: o.plan, free_seats: FREE_SEATS, billing: !!billing, price: billing?.priceLabel || null, can_bill: !!billing && ['owner', 'admin'].includes(myRole) },
+        plan: o.plan, review: o.review, git: gitDir ? `${baseUrl}/git/${o.slug}.git` : null, free_seats: FREE_SEATS, billing: !!billing, price: billing?.priceLabel || null, can_bill: !!billing && ['owner', 'admin'].includes(myRole) },
       members: all('SELECT u.id, u.handle, u.name, m.role FROM members m JOIN users u ON u.id=m.user_id WHERE m.org_id=:o ORDER BY u.handle', { o: o.id }),
       skills: all(`SELECT ${SKILL_COLS} FROM ${SKILL_FROM} WHERE s.owner_org=:o ORDER BY s.name`, { o: o.id }).map((s) => pubSkill(s, me.id)),
     };
@@ -528,14 +582,15 @@ export function createApp({ db, baseUrl = '', billing = null, redirectHosts = []
     const v = one('SELECT bundle FROM versions WHERE skill_id=:s AND version=:v', { s: s.id, v: Number(body.version) }) || fail(404, 'no such version');
     return pushSkill(me, { org: s.owner_org ? s.owner : undefined, name: s.name, files: JSON.parse(v.bundle), note: `rolled back to version ${body.version}` });
   });
-  r('DELETE', '/api/skills/([\\w-]+)', false, ({ me, m }) => {
-    const s = visibleSkill(m[1], me.id);
+  function deleteSkill(me, s, opts = {}) {
     if (!canManage(s, me.id)) fail(403, 'only admins can delete this skill');
     const who = audience(s);
     run('DELETE FROM skills WHERE id=:s', { s: s.id });
+    if (!opts.fromGit) for (const f of hooks.remove) f(s, me.id);
     notify(who);
     return { ok: true };
-  });
+  }
+  r('DELETE', '/api/skills/([\\w-]+)', false, ({ me, m }) => deleteSkill(me, visibleSkill(m[1], me.id)));
   r('POST', '/api/skills/([\\w-]+)/install', false, ({ me, m }) => {
     const s = visibleSkill(m[1], me.id);
     run('INSERT OR IGNORE INTO installs VALUES(:u,:s)', { u: me.id, s: s.id });
@@ -549,42 +604,66 @@ export function createApp({ db, baseUrl = '', billing = null, redirectHosts = []
   });
 
   // Suggested changes: anyone who can see a skill but not edit it proposes new files; an editor approves or declines.
-  r('POST', '/api/skills/([\\w-]+)/proposals', false, ({ me, m, body }) => {
-    const s = visibleSkill(m[1], me.id);
-    checkFiles(body.files);
-    if (bundleHash(body.files) === s.hash) fail(400, 'that is the same as the current version');
-    const id = rid(9);
-    run('INSERT INTO proposals(id,skill_id,user_id,base_version,bundle,note,created) VALUES(:id,:s,:u,:v,:b,:n,:t)',
-      { id, s: s.id, u: me.id, v: s.version, b: JSON.stringify(body.files), n: String(body.note || '').slice(0, 2000), t: now() });
-    return { proposal: { id, skill: `${s.owner}/${s.name}`, status: 'open' } };
-  });
-  r('GET', '/api/proposals', false, ({ me, query }) => {
-    const rows = all(`SELECT p.id, p.skill_id, p.user_id, p.bundle, p.note, p.created, p.base_version, a.handle author,
-        s.owner_user, s.owner_org, s.name, s.version, coalesce(u.handle, o.slug) owner
-      FROM proposals p JOIN users a ON a.id=p.user_id JOIN skills s ON s.id=p.skill_id LEFT JOIN users u ON u.id=s.owner_user LEFT JOIN orgs o ON o.id=s.owner_org
-      WHERE p.status='open' AND (:sid IS NULL OR p.skill_id=:sid) ORDER BY p.created DESC`, { sid: query.get('skill') || null });
-    return {
-      proposals: rows.filter((p) => canEdit(p, me.id) || p.user_id === me.id).map((p) => {
-        const files = JSON.parse(p.bundle);
-        return { id: p.id, skill_id: p.skill_id, skill: `${p.owner}/${p.name}`, author: p.author, note: p.note, created: p.created, base_version: p.base_version,
-          current_version: p.version, can_approve: canEdit(p, me.id), files: Object.keys(files).sort(),
-          skill_md: files['SKILL.md'] ? Buffer.from(files['SKILL.md'], 'base64').toString('utf8') : '' };
-      }),
-    };
-  });
-  const getProposal = (id) => one(`SELECT * FROM proposals WHERE id=:id AND status='open'`, { id }) || fail(404, 'no open suggestion with that id');
-  r('POST', '/api/proposals/([\\w-]+)/approve', false, ({ me, m }) => {
-    const p = getProposal(m[1]), s = visibleSkill(p.skill_id, me.id);
-    if (!canEdit(s, me.id)) fail(403, 'only editors can approve suggestions');
-    const out = pushSkill(me, { org: s.owner_org ? s.owner : undefined, name: s.name, files: JSON.parse(p.bundle), note: p.note || 'suggested change' }, p.user_id);
+  r('POST', '/api/skills/([\\w-]+)/proposals', false, ({ me, m, body }) => ({ proposal: propose(me, visibleSkill(m[1], me.id), body.files, { note: body.note }) }));
+  const proposalOut = (p, u) => {
+    const files = JSON.parse(p.bundle), base = p.base_bundle ? JSON.parse(p.base_bundle) : versionFiles(p.skill_id, p.base_version);
+    const cur = p.version ? versionFiles(p.skill_id, p.version) : {};
+    const md = (f) => (f['SKILL.md'] ? Buffer.from(f['SKILL.md'], 'base64').toString('utf8') : '');
+    const approvals = all('SELECT u.handle FROM approvals a JOIN users u ON u.id=a.user_id WHERE a.proposal_id=:p ORDER BY a.created', { p: p.id }).map((r) => r.handle);
+    const needs = Math.max(reviewsNeeded(p), 1);
+    return { id: p.id, skill_id: p.skill_id, skill: `${p.owner}/${p.name}`, author: p.author, note: p.note, created: p.created, base_version: p.base_version,
+      current_version: p.version, new_skill: !p.version, branch: p.branch?.replace(/^refs\/heads\//, '') || null, commit: p.commit_sha,
+      approvals, needs, can_approve: canEdit(p, u) && !(reviewsNeeded(p) > 0 && p.user_id === u) && !approvals.includes(p.my_handle),
+      can_close: canEdit(p, u) || p.user_id === u, mine: p.user_id === u,
+      conflicts: merge3(base, files, cur).conflicts,
+      changed: [...new Set([...Object.keys(files), ...Object.keys(base)])].filter((f) => files[f] !== base[f]).sort(),
+      files: Object.keys(files).sort(), skill_md: md(files), base_md: md(base) };
+  };
+  const PROPOSAL_SQL = `SELECT p.*, a.handle author, :h my_handle, s.owner_user, s.owner_org, s.name, s.version, coalesce(u.handle, o.slug) owner
+      FROM proposals p JOIN users a ON a.id=p.user_id JOIN skills s ON s.id=p.skill_id LEFT JOIN users u ON u.id=s.owner_user LEFT JOIN orgs o ON o.id=s.owner_org`;
+  r('GET', '/api/proposals', false, ({ me, query }) => ({
+    proposals: all(`${PROPOSAL_SQL} WHERE p.status='open' AND (:sid IS NULL OR p.skill_id=:sid) AND (:org IS NULL OR o.slug=:org) ORDER BY p.created DESC`,
+      { sid: query.get('skill') || null, org: query.get('org') || null, h: me.handle })
+      .filter((p) => canEdit(p, me.id) || p.user_id === me.id).map((p) => proposalOut(p, me.id)),
+  }));
+  const getProposal = (id, h = '') => one(`${PROPOSAL_SQL} WHERE p.id=:id AND p.status='open'`, { id, h }) || fail(404, 'no open change request with that id');
+  // Approve: with a review rule, someone other than the author approves, and the change merges once it has enough approvals.
+  // Files changed on both sides since the request started are a conflict; the author updates the request first.
+  function approve(me, id) {
+    const p = getProposal(id, me.handle), s = visibleSkill(p.skill_id, me.id);
+    if (!canEdit(s, me.id)) fail(403, 'only editors and admins can approve changes');
+    const needs = reviewsNeeded(s);
+    if (needs > 0 && p.user_id === me.id) fail(403, 'someone else has to approve your own change');
+    run('INSERT OR IGNORE INTO approvals VALUES(:p,:u,:t)', { p: p.id, u: me.id, t: now() });
+    const got = one('SELECT count(*) n FROM approvals WHERE proposal_id=:p', { p: p.id }).n;
+    if (got < Math.max(needs, 1)) return { merged: false, approvals: got, needs, proposal: proposalOut(getProposal(p.id, me.handle), me.id) };
+    const base = p.base_bundle ? JSON.parse(p.base_bundle) : versionFiles(s.id, p.base_version);
+    const { files, conflicts } = merge3(base, JSON.parse(p.bundle), s.version ? versionFiles(s.id, s.version) : {});
+    if (conflicts.length) fail(409, `${s.owner}/${s.name} changed since this request started, and both changed ${conflicts.join(', ')}. The author needs to update the request.`);
+    const out = pushSkill(me, { org: s.owner_org ? s.owner : undefined, name: s.name, files, note: p.note || 'approved change' }, p.user_id, { direct: true, merge: p.commit_sha });
     run(`UPDATE proposals SET status='approved' WHERE id=:id`, { id: p.id });
-    return out;
-  });
+    return { merged: true, ...out };
+  }
+  r('POST', '/api/proposals/([\\w-]+)/approve', false, ({ me, m }) => approve(me, m[1]));
+  function closeProposal(id, status) {
+    const p = one('SELECT skill_id FROM proposals WHERE id=:id', { id });
+    run('UPDATE proposals SET status=:st WHERE id=:id', { id, st: status });
+    // A new skill that only existed as this request goes away with it.
+    if (!one(`SELECT 1 x FROM proposals WHERE skill_id=:s AND status='open'`, { s: p.skill_id })) run('DELETE FROM skills WHERE id=:s AND version=0', { s: p.skill_id });
+  }
   r('POST', '/api/proposals/([\\w-]+)/decline', false, ({ me, m }) => {
     const p = getProposal(m[1]), s = visibleSkill(p.skill_id, me.id);
-    if (!canEdit(s, me.id) && p.user_id !== me.id) fail(403, 'only editors or the author can close a suggestion');
-    run(`UPDATE proposals SET status='declined' WHERE id=:id`, { id: p.id });
+    if (!canEdit(s, me.id) && p.user_id !== me.id) fail(403, 'only editors or the author can close a change request');
+    closeProposal(p.id, 'declined');
     return { ok: true };
+  });
+  r('POST', '/api/orgs/([\\w-]+)/settings', false, ({ me, m, body }) => {
+    const o = getOrg(m[1]);
+    if (!isAdmin(o.id, me.id)) fail(403, 'only admins change review rules');
+    const review = Number(body.review);
+    if (![0, 1, 2, 3].includes(review)) fail(400, 'review must be 0, 1, 2 or 3 approvals');
+    run('UPDATE orgs SET review=:r WHERE id=:o', { r: review, o: o.id });
+    return { ok: true, review };
   });
 
   // Chat: people and their agents in one conversation (a direct message or a group).
@@ -917,6 +996,36 @@ export function createApp({ db, baseUrl = '', billing = null, redirectHosts = []
         const r = await call(me, 'POST', `/api/skills/${s.id}/proposals`, { files: { ...cur, ...fileMap(a) }, note: a.note });
         return `Suggested change ${r.proposal.id} sent to the editors of ${r.proposal.skill}.`;
       }],
+    ['list_changes', 'Open change requests (suggested changes and git branches) on skills you can edit or that you sent, with approvals so far and what changed.',
+      { skill: str('owner/name; omit for all') }, [],
+      async (me, a) => {
+        const sid = a.skill ? (await resolve(me, a.skill)).id : '';
+        const ps = (await call(me, 'GET', `/api/proposals${sid ? `?skill=${sid}` : ''}`)).proposals;
+        return ps.map((p) => `${p.id}  ${p.skill}${p.new_skill ? ' (new skill)' : ''} by @${p.author}${p.branch ? ` from branch ${p.branch}` : ''}: ${p.note || '(no note)'}\n`
+          + `  changed: ${p.changed.join(', ')}; approvals ${p.approvals.length} of ${p.needs}${p.approvals.length ? ` (${p.approvals.map((h) => `@${h}`).join(', ')})` : ''}`
+          + `${p.conflicts.length ? `; CONFLICTS in ${p.conflicts.join(', ')}` : ''}${p.can_approve ? '; you can approve' : ''}\n  proposed SKILL.md:\n${p.skill_md.replace(/^/gm, '    ')}`).join('\n\n') || 'No open change requests.';
+      }],
+    ['review_change', 'Approve or decline a change request. Only do this when your owner told you to; approving merges it once it has enough approvals.',
+      { id: str('change request id from list_changes'), decision: str('approve or decline') }, ['id', 'decision'],
+      async (me, a) => {
+        if (a.decision === 'decline') { await call(me, 'POST', `/api/proposals/${a.id}/decline`); return 'Declined.'; }
+        const r = await call(me, 'POST', `/api/proposals/${a.id}/approve`);
+        return r.merged ? `Approved and merged: ${brief(r.skill)}` : `Approved (${r.approvals} of ${r.needs}); it merges when enough editors approve.`;
+      }],
+    ['list_services', 'Services your organizations connected to Rucksack (APIs whose keys Rucksack holds) and what you may do with each: none, read, ask (changes wait for an admin) or write.',
+      {}, [],
+      async (me) => access.mine(me.id).map((c) => `${c.org}/${c.name}: ${c.description || c.base_url} (base ${c.base_url}); you: ${c.my_level}`).join('\n') || 'No connected services.'],
+    ['call_service', 'Call a connected service through Rucksack, which adds the key. Paths are relative to the service base address. Reads (GET) go through if you have read access; other methods need write, or wait for an admin with ask.',
+      { service: str('org/name from list_services'), method: str('GET, POST, PUT, PATCH, DELETE'), path: str('path under the base address, with any ?query'),
+        body: { description: 'JSON body for POST, PUT, PATCH' }, reason: str('why, shown to the admin who approves it') }, ['service', 'path'],
+      async (me, a) => {
+        const [org, name] = String(a.service).split('/');
+        const r = await call(me, 'POST', `/api/orgs/${org}/connections/${name}/call`, { method: a.method, path: a.path, body: a.body, reason: a.reason });
+        return r.status === 'waiting' ? `${r.message} Request id ${r.id}; check it later with check_service_request.` : `HTTP ${r.http}\n${r.result}`;
+      }],
+    ['check_service_request', 'See whether a service call that was waiting for approval went through, and its result.',
+      { id: str('request id') }, ['id'],
+      async (me, a) => { const x = (await call(me, 'GET', `/api/access-requests/${a.id}`)).request; return `${x.method} ${x.path}: ${x.status}${x.decided_by ? ` by @${x.decided_by}` : ''}${x.http != null ? `\nHTTP ${x.http}\n${x.result}` : ''}`; }],
     ['list_conversations', 'Chats you are in (direct and group, with people and their agents), whether you (the agent) take part in each, and unread counts.',
       {}, [],
       async (me) => (await call(me, 'GET', '/api/convos')).convos.map((c) => `${c.id}  ${c.kind === 'dm' ? `with ${c.name}` : `group "${c.name}"`}  ${c.members.map((x) => `@${x.handle}${x.agent ? '+agent' : ''}`).join(' ')}  ${c.my_agent ? 'you take part' : 'you are off here'}${c.unread ? `, ${c.unread} unread` : ''}`).join('\n') || 'No conversations yet.'],
@@ -1019,6 +1128,11 @@ echo "Done. Add ~/.local/bin to your PATH if 'skillnet' is not found."
     fs.createReadStream(file).pipe(res);
   }
 
+  const access = accessApi({ r, one, all, run, getOrg, role, isAdmin, rid, now, fail, secretKey, allowPrivate, emit });
+  const mirror = gitDir && gitMirror({ gitDir, baseUrl, one, all, run, getOrg, role, isEditor, isAdmin, pushSkill, deleteSkill, propose, closeProposal,
+    frontmatter, rid, now, hooks, NAME_RE });
+  if (gitDir) fs.mkdirSync(gitDir, { recursive: true });
+
   const readBody = async (req) => {
     const chunks = []; let n = 0;
     for await (const c of req) { n += c.length; if (n > MAX_BUNDLE * 1.5) fail(413, 'request too large'); chunks.push(c); }
@@ -1108,6 +1222,8 @@ echo "Done. Add ~/.local/bin to your PATH if 'skillnet' is not found."
       if (req.method !== 'POST') return res.writeHead(405, { Allow: 'POST' }).end();
     }
     if (url.pathname === '/api/stripe/webhook' && req.method === 'POST') return stripeWebhook(req, res);
+    if (mirror && url.pathname === '/internal/git-hook' && req.method === 'POST') return mirror.hookRoute(req, res, readBody);
+    if (mirror && url.pathname.startsWith('/git/')) return mirror.serve(req, res, url, auth);
     if (url.pathname === '/install.sh') return res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' }).end(installScript());
     const cli = /^\/cli\/(skillnet\.js|pi-skillnet-reload\.ts)$/.exec(url.pathname)?.[1];
     if (cli) return res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' }).end(fs.readFileSync(path.join(HERE, 'cli', cli)));
@@ -1148,7 +1264,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const e = process.env;
   const billing = e.STRIPE_KEY && e.STRIPE_PRICE && e.STRIPE_WEBHOOK_SECRET
     ? { stripe: stripeClient(e.STRIPE_KEY), price: e.STRIPE_PRICE, webhookSecret: e.STRIPE_WEBHOOK_SECRET, priceLabel: e.STRIPE_PRICE_LABEL || null } : null;
-  const app = createApp({ db, baseUrl: e.SKILLNET_URL || `http://localhost:${port}`, billing,
+  const app = createApp({ db, baseUrl: e.SKILLNET_URL || `http://localhost:${port}`, billing, secretKey: e.SKILLNET_SECRET_KEY || null,
+    gitDir: e.SKILLNET_GIT_DIR || path.join(path.dirname(e.SKILLNET_DB || path.join(HERE, 'data', 'x')), 'git'),
     redirectHosts: (e.SKILLNET_REDIRECT_HOSTS || '').split(',').filter(Boolean) });
   http.createServer(app.handle).listen(port, process.env.HOST || '127.0.0.1', () => console.log(`skillnet on :${port}`));
 }
