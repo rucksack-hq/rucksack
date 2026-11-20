@@ -202,6 +202,33 @@ async function suggest(dir, flags) {
   const r = await api('POST', `/api/skills/${s.id}/proposals`, { files: readFolder(dir), note: flags.note });
   log(`suggested change ${r.proposal.id} sent to the editors of ${r.proposal.skill}`);
 }
+// Chat: conversations are named by @handle (direct), group name, or id.
+const findConvo = async (ref) => (await api('GET', `/api/convos/resolve?ref=${encodeURIComponent(ref)}`)).convo;
+// Wait for the next message someone else sends (to this agent's account), print it, and exit: lets an agent block on a reply.
+async function listen(ref, flags) {
+  const c = conf(), only = ref && (await findConvo(ref)).id, me = (await api('GET', '/api/me')).user.id;
+  const ctl = new AbortController(), secs = Number(flags.timeout || 0);
+  if (secs) setTimeout(() => ctl.abort(), secs * 1000);
+  let found = null;
+  try {
+    const res = await fetch(`${c.server}/api/events`, { headers: { Authorization: `Bearer ${c.token}` }, signal: ctl.signal });
+    let buf = '';
+    read: for await (const chunk of res.body) {
+      buf += Buffer.from(chunk).toString('utf8');
+      let i;
+      while ((i = buf.indexOf('\n\n')) >= 0) {
+        const ev = buf.slice(0, i); buf = buf.slice(i + 2);
+        if (!/^event: message$/m.test(ev)) continue;
+        const d = JSON.parse(/^data: (.*)$/m.exec(ev)[1]);
+        if (d.message.from.id === me || (only && d.convo !== only)) continue;
+        found = d;
+        break read;
+      }
+    }
+  } catch (e) { if (e.name !== 'AbortError') throw e; }
+  ctl.abort();
+  return found;
+}
 const userByHandle = (list, handle) => list.find((u) => u.handle === handle.replace(/^@/, '')) || die(`@${handle} is not in that list`);
 
 // Run `skillnet watch` at login: launchd on macOS, a systemd user unit on Linux.
@@ -276,6 +303,15 @@ Changes
   rollback owner/name VERSION
   delete owner/name --yes
 
+Chat (people and their agents; the agent sends within what its owner allows)
+  chats                          conversations, who is in them, unread
+  read CONVO                     recent messages (CONVO is @handle, a group name, or an id)
+  say CONVO TEXT [--kind chat|question|task|personal] [--skill owner/name]
+  listen [CONVO] [--timeout SECS]  wait for the next message, print it, exit
+  chat new NAME [@friend ...] | chat with @friend | chat join LINK
+  chat invite CONVO | chat agent CONVO on|off
+  perms [CONVO] | perms [CONVO] set out|in KIND allow|ask|never
+
 People
   friends | friend add WHO | friend remove HANDLE
   orgs | org create ID [NAME] | org show ID | org invite ID [--new] | join CODE-OR-LINK
@@ -297,7 +333,7 @@ async function main() {
   const ref = () => rest[0] || die(`usage: skillnet ${cmd} owner/name`);
   const need = (i, what) => rest[i] || die(`usage: skillnet ${cmd} ${what}`);
   const sub = rest.shift();
-  if (!['friend', 'org', 'key'].includes(cmd) && sub !== undefined) rest.unshift(sub);
+  if (!['friend', 'org', 'key', 'chat'].includes(cmd) && sub !== undefined) rest.unshift(sub);
   switch (cmd) {
     case 'setup': await login(rest[0]); piExtension(); await sync(); serviceInstall(); break;
     case 'login':
@@ -349,6 +385,35 @@ async function main() {
       break;
     }
     case 'join': { const code = need(0, 'CODE-OR-LINK'); const r = await api('POST', '/api/join', { code: /code=([\w-]+)/.exec(code)?.[1] || code }); log(`you joined ${r.org.name}`); await sync(); break; }
+    case 'chats': {
+      const { convos } = await api('GET', '/api/convos');
+      out(flags, convos, () => convos.map((c) => `${c.id}  ${c.kind === 'dm' ? `@${c.members.find((x) => x.name === c.name || x.handle === c.name)?.handle || c.name}` : `"${c.name}"`}  ${c.members.length} people${c.my_agent ? ', your agent is in' : ''}${c.unread ? `, ${c.unread} unread` : ''}${c.waiting ? `, ${c.waiting} waiting for your approval` : ''}`).join('\n') || 'No conversations. Start one: skillnet chat with @friend');
+      break;
+    }
+    case 'read': flags.json ? out(flags, await api('GET', `/api/convos/${(await findConvo(ref())).id}`)) : log(await tool('read_conversation', { conversation: ref() })); break;
+    case 'say': {
+      const c = await findConvo(need(0, 'CONVO TEXT'));
+      const r = await api('POST', `/api/convos/${c.id}/messages`, { text: rest.slice(1).join(' '), kind: flags.skill ? 'skill' : flags.kind || 'chat', skill: flags.skill });
+      out(flags, r, r.message.status === 'held' ? 'held: your owner approves this kind of message first (on the website)' : 'sent');
+      break;
+    }
+    case 'listen': { const d = await listen(rest[0], flags); if (!d) die('no message before the timeout'); out(flags, d, () => `${d.convo}  ${d.message.agent ? `@${d.message.from.handle}'s agent` : `@${d.message.from.handle}`}${d.message.kind === 'chat' ? '' : ` (${d.message.kind})`}: ${d.message.kind === 'skill' ? `shared ${d.message.data.skill.ref}` : d.message.text}`); break; }
+    case 'chat': {
+      if (sub === 'new') { const r = await api('POST', '/api/convos', { name: need(0, 'new NAME [@friend ...]'), people: rest.slice(1) }); log(`started "${r.convo.name}" (${r.convo.id}). Invite link: ${r.convo.invite}`); }
+      else if (sub === 'with') { const r = await api('POST', '/api/convos', { with: need(0, 'with @friend') }); log(`${r.convo.id}  with ${r.convo.name}`); }
+      else if (sub === 'join') { const r = await api('POST', '/api/convos/join', { code: need(0, 'join LINK') }); log(`joined "${r.convo.name}"`); }
+      else if (sub === 'invite') log((await findConvo(need(0, 'invite CONVO'))).invite || die('direct chats have no invite link'));
+      else if (sub === 'agent') { const c = await findConvo(need(0, 'agent CONVO on|off')); await api('PATCH', `/api/convos/${c.id}`, { agent: need(1, 'agent CONVO on|off') === 'on' }); log(`your agent is ${rest[1]} in ${c.name}`); }
+      else die('usage: skillnet chat new|with|join|invite|agent ...');
+      break;
+    }
+    case 'perms': {
+      const c = rest[0] && rest[0] !== 'set' ? await findConvo(rest.shift()) : null;
+      if (rest[0] === 'set') await api('PUT', '/api/permissions', { convo: c?.id, [need(1, 'set out|in KIND MODE')]: { [need(2, 'set out|in KIND MODE')]: need(3, 'set out|in KIND MODE') } });
+      const p = await api('GET', `/api/permissions${c ? `?convo=${c.id}` : ''}`);
+      out(flags, p, () => [`${c ? c.name : 'Defaults for every conversation'}`, ...Object.entries(p.kinds).map(([k, label]) => `  ${k.padEnd(9)} send: ${p.permissions.out[k].padEnd(5)}  shown: ${p.permissions.in[k].padEnd(5)}  ${label}`)].join('\n'));
+      break;
+    }
     case 'keys': { const { tokens } = await api('GET', '/api/tokens'); out(flags, tokens, () => tokens.map((t) => `${t.id}  ${t.kind === 'key' ? `key (${t.scope})` : 'machine'}  ${t.label}  last used ${when(t.used)}`).join('\n') || 'None.'); break; }
     case 'key':
       if (sub === 'create') { const r = await api('POST', '/api/keys', { label: rest.join(' ') || die('usage: skillnet key create LABEL [--write]'), scope: flags.write ? 'write' : 'read' }); out(flags, r, `${r.key}\n(${r.scope} key "${r.label}"; shown once. Set it as SKILLNET_KEY in the cloud run's secrets.)`); }

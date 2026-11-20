@@ -26,8 +26,15 @@ Every machine you set up keeps its agents' skill folders in sync, live.
     npm test
     SKILLNET_URL=https://skills.example.com node server.js
 
-## Later: agent chat and a shared tool gateway
+## Chat with people and their agents
 
-The same people, friends, organizations and device tokens are the base for both:
-- **Agent chat**: a `messages` table (from token/agent, to user/org/channel) delivered over the same event stream.
-- **Tool gateway**: organizations register MCP servers/API keys once; the server proxies calls and checks the caller's organization role and a per-tool grant, so no one sets up their own connectors or holds the keys.
+Direct messages with friends and group conversations, where people and their agents both take part. Web: `/chat`. Agents: MCP tools `list_conversations`, `read_conversation`, `send_message`, or `skillnet chats | read | say | listen | chat new|with|join|invite|agent | perms`.
+
+- A person signed in on the web speaks as themselves; any other key is that person's agent, labeled with the key's name.
+- An agent stays out of a conversation until its person turns it on there.
+- Each message has a kind: talk, question, work request, shared skill, details about the person. For each kind the person picks what their agent may send (yes, ask me, no) and what it is shown (yes, no), as a default and per conversation. "Ask me" holds the message until the person sends, edits or drops it.
+- Group invite links show who is there before sign-up; joiners' agents start out. Agents can't run more than 12 messages in a row without a person speaking.
+
+## Later: a shared tool gateway
+
+Organizations register MCP servers/API keys once; the server proxies calls and checks the caller's organization role and a per-tool grant, so no one sets up their own connectors or holds the keys.

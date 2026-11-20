@@ -14,6 +14,14 @@ const NAME_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const VIS_USER = ['private', 'friends', 'public'];
 const VIS_ORG = ['org', 'public'];
 const ROLES = ['owner', 'admin', 'editor', 'member'];
+// What an agent may say in a chat, each kind gated by its owner: out = allow (send), ask (hold for the owner), never; in = allow, never.
+const KIND_LABELS = { chat: 'Talk and answer', question: 'Ask questions', task: 'Ask for work to be done', skill: 'Share skills', personal: 'Share details about me (calendar, contacts, files, places)' };
+const KINDS = Object.keys(KIND_LABELS);
+const DEFAULT_GRANTS = {
+  out: { chat: 'ask', question: 'ask', task: 'ask', skill: 'allow', personal: 'never' },
+  in: { chat: 'allow', question: 'allow', task: 'never', skill: 'allow', personal: 'allow' },
+};
+const AGENT_RUN = 12; // agent messages in a row, with no person speaking, before agents must wait
 // The skill every account gets: teaches agents to answer Skillnet questions from the harness.
 const GUIDE_ID = 'skillnet-guide';
 const guideFiles = (baseUrl) => ({ 'SKILL.md': Buffer.from(fs.readFileSync(path.join(HERE, 'builtin', 'skillnet', 'SKILL.md'), 'utf8').replaceAll('{{URL}}', baseUrl)).toString('base64') });
@@ -48,6 +56,16 @@ export function openDb(file) {
     CREATE TABLE IF NOT EXISTS oauth_clients(id TEXT PRIMARY KEY, name TEXT NOT NULL, redirect_uris TEXT NOT NULL, created INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS oauth_codes(hash TEXT PRIMARY KEY, client_id TEXT NOT NULL, user_id TEXT NOT NULL REFERENCES users ON DELETE CASCADE,
       redirect_uri TEXT NOT NULL, challenge TEXT NOT NULL, scope TEXT NOT NULL, created INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS convos(id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL DEFAULT '', invite TEXT UNIQUE,
+      agents TEXT NOT NULL DEFAULT '{}', created_by TEXT, created INTEGER NOT NULL, last INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS convo_members(convo_id TEXT NOT NULL REFERENCES convos ON DELETE CASCADE, user_id TEXT NOT NULL REFERENCES users ON DELETE CASCADE,
+      role TEXT NOT NULL DEFAULT 'member', read INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(convo_id,user_id));
+    CREATE TABLE IF NOT EXISTS messages(id TEXT PRIMARY KEY, convo_id TEXT NOT NULL REFERENCES convos ON DELETE CASCADE,
+      user_id TEXT NOT NULL REFERENCES users ON DELETE CASCADE, agent TEXT, kind TEXT NOT NULL, text TEXT NOT NULL, data TEXT,
+      status TEXT NOT NULL DEFAULT 'sent', hold TEXT, created INTEGER NOT NULL);
+    CREATE INDEX IF NOT EXISTS messages_convo ON messages(convo_id, created);
+    CREATE TABLE IF NOT EXISTS grants(owner TEXT NOT NULL REFERENCES users ON DELETE CASCADE, other TEXT NOT NULL, dir TEXT NOT NULL,
+      kind TEXT NOT NULL, mode TEXT NOT NULL, PRIMARY KEY(owner,other,dir,kind));
   `);
   // Columns added after the first release.
   for (const sql of [`ALTER TABLE tokens ADD COLUMN scope TEXT NOT NULL DEFAULT 'write'`, `ALTER TABLE skills ADD COLUMN body TEXT NOT NULL DEFAULT ''`,
@@ -100,10 +118,11 @@ export function createApp({ db, baseUrl = '' }) {
   const run = (sql, p = {}) => db.prepare(sql).run(p);
 
   // Live push: every connected sync client of a user gets "sync" and re-reads its manifest.
-  const streams = new Map(); // user_id -> Set(res)
-  const notify = (userIds) => {
-    for (const u of new Set(userIds)) for (const res of streams.get(u) || []) res.write(`event: sync\ndata: {}\n\n`);
+  const streams = new Map(); // user_id -> Set(res); res.human is true for website sessions, false for agents
+  const emit = (userIds, event, data = () => ({}), only = () => true) => {
+    for (const u of new Set(userIds)) for (const res of streams.get(u) || []) if (only(res, u)) res.write(`event: ${event}\ndata: ${JSON.stringify(data(u, res))}\n\n`);
   };
+  const notify = (userIds) => emit(userIds, 'sync');
   // Everyone who might see or have this skill: owner, owner's friends, org members, installers. Public skills reach installers only.
   const audience = (s) => [
     ...(s.owner_user ? [s.owner_user, ...friendIds(s.owner_user)] : []),
@@ -146,7 +165,8 @@ export function createApp({ db, baseUrl = '' }) {
     const cookie = bearerOnly ? null : /(?:^|;\s*)sn=([^;]+)/.exec(req.headers.cookie || '')?.[1];
     const tok = bearer || cookie;
     if (!tok) return null;
-    const row = one(`SELECT t.id tid, t.kind tkind, t.scope, t.grant_id, u.* FROM tokens t JOIN users u ON u.id=t.user_id
+    const row = one(`SELECT t.id tid, t.kind tkind, COALESCE(g.label, t.label) tlabel, t.scope, t.grant_id, u.* FROM tokens t JOIN users u ON u.id=t.user_id
+      LEFT JOIN tokens g ON g.id=t.grant_id
       WHERE t.hash=:h AND t.kind!='connector' AND (t.expires IS NULL OR t.expires>:n)`, { h: sha(tok), n: now() });
     if (row) run('UPDATE tokens SET used=:n WHERE id IN (:id, :g)', { n: now(), id: row.tid, g: row.grant_id || row.tid });
     return row || null;
@@ -227,7 +247,7 @@ export function createApp({ db, baseUrl = '' }) {
     return { ok: true, me: me.id };
   });
   r('GET', '/api/me', false, ({ me }) => ({
-    user: userOut(me), email: me.email,
+    user: userOut(me), email: me.email, chat_unread: chatList(me).reduce((n, c) => n + c.unread + c.waiting, 0),
     orgs: all('SELECT o.slug, o.name, m.role FROM members m JOIN orgs o ON o.id=m.org_id WHERE m.user_id=:u ORDER BY o.name', { u: me.id }),
   }));
 
@@ -482,6 +502,231 @@ export function createApp({ db, baseUrl = '' }) {
     return { ok: true };
   });
 
+  // Chat: people and their agents in one conversation (a direct message or a group).
+  // A message sent with a website session is from the person; one sent with a device or API key is from that person's agent.
+  // What an agent may send is checked against its owner's permissions; people are never gated.
+  const isAgent = (me) => me.tkind !== 'web';
+  const convoOf = (id, u) => one('SELECT c.*, cm.role my_role, cm.read my_read FROM convos c JOIN convo_members cm ON cm.convo_id=c.id AND cm.user_id=:u WHERE c.id=:id', { id, u }) || fail(404, 'no such conversation');
+  const memberIds = (cid) => all('SELECT user_id FROM convo_members WHERE convo_id=:c', { c: cid }).map((r) => r.user_id);
+  const agentsOn = (c) => JSON.parse(c.agents || '{}');
+  // Effective permission: this conversation's setting, else the person's default, else the built-in default.
+  const mode = (u, cid, dir, kind) =>
+    one('SELECT mode FROM grants WHERE owner=:u AND other=:o AND dir=:d AND kind=:k', { u, o: cid, d: dir, k: kind })?.mode ??
+    one(`SELECT mode FROM grants WHERE owner=:u AND other='*' AND dir=:d AND kind=:k`, { u, d: dir, k: kind })?.mode ?? DEFAULT_GRANTS[dir][kind];
+  const grantsFor = (u, cid) => Object.fromEntries(['out', 'in'].map((dir) => [dir, Object.fromEntries(KINDS.map((k) => [k, mode(u, cid, dir, k)]))]));
+  // Can this stream (or token) see this message? Held and declined messages show only to the sender's own account;
+  // an agent sees nothing in a conversation where its owner turned it off, nor kinds its owner keeps from it.
+  const sees = (m, u, agent, c) => {
+    if (m.status !== 'sent' && m.user_id !== u) return false;
+    if (!agent) return true;
+    if (!agentsOn(c)[u]) return false;
+    return m.user_id === u || mode(u, c.id, 'in', m.kind) === 'allow';
+  };
+  const msgOut = (m) => {
+    const u = one('SELECT * FROM users WHERE id=:id', { id: m.user_id });
+    return { id: m.id, convo: m.convo_id, from: userOut(u), agent: m.agent, kind: m.kind, text: m.text, data: m.data ? JSON.parse(m.data) : null, status: m.status, created: m.created };
+  };
+  const convoOut = (c, me) => {
+    const members = all('SELECT u.id, u.handle, u.name, cm.role FROM convo_members cm JOIN users u ON u.id=cm.user_id WHERE cm.convo_id=:c ORDER BY u.handle', { c: c.id });
+    const on = agentsOn(c);
+    const last = all('SELECT * FROM messages WHERE convo_id=:c ORDER BY created DESC LIMIT 20', { c: c.id }).find((m) => sees(m, me.id, false, c));
+    const other = c.kind === 'dm' ? members.find((x) => x.id !== me.id) : null;
+    return {
+      id: c.id, kind: c.kind, name: c.kind === 'dm' ? other?.name || other?.handle || 'Just you' : c.name, last_at: c.last,
+      members: members.map((x) => ({ ...userOut(x), role: x.role, agent: !!on[x.id] })), my_agent: !!on[me.id],
+      invite: c.kind === 'group' ? `${baseUrl}/c?code=${c.invite}` : null,
+      last: last ? msgOut(last) : null,
+      unread: one(`SELECT count(*) n FROM messages WHERE convo_id=:c AND status='sent' AND user_id!=:u AND created>:r`, { c: c.id, u: me.id, r: c.my_read }).n,
+      waiting: one(`SELECT count(*) n FROM messages WHERE convo_id=:c AND status='held' AND user_id=:u`, { c: c.id, u: me.id }).n,
+    };
+  };
+  function chatList(me) {
+    return all('SELECT c.*, cm.role my_role, cm.read my_read FROM convos c JOIN convo_members cm ON cm.convo_id=c.id AND cm.user_id=:u ORDER BY c.last DESC', { u: me.id })
+      .map((c) => convoOut(c, me));
+  }
+  // Tell every member's open screens and agents about a message, each only what they may see.
+  const broadcast = (c, m) => {
+    c = one('SELECT * FROM convos WHERE id=:id', { id: c.id });
+    emit(memberIds(c.id), 'message', () => ({ convo: c.id, message: msgOut(m) }), (res, u) => sees(m, u, !res.human, c));
+  };
+  const addMember = (cid, u, role = 'member') => {
+    run('INSERT OR IGNORE INTO convo_members(convo_id,user_id,role,read) VALUES(:c,:u,:r,0)', { c: cid, u, r: role });
+  };
+  const setAgent = (cid, u, on) => {
+    const c = one('SELECT agents FROM convos WHERE id=:id', { id: cid });
+    run('UPDATE convos SET agents=:a WHERE id=:id', { a: JSON.stringify({ ...JSON.parse(c.agents), [u]: !!on }), id: cid });
+  };
+
+  r('GET', '/api/convos', false, ({ me }) => ({ convos: chatList(me), kinds: KIND_LABELS }));
+  // {with: handle} opens (or reopens) a direct conversation with a friend; {name} starts a group with an invite link.
+  r('POST', '/api/convos', false, ({ me, body }) => {
+    let c;
+    if (body.with) {
+      const who = String(body.with).trim().toLowerCase().replace(/^@/, '');
+      const them = one('SELECT * FROM users WHERE handle=:w OR email=:w', { w: who }) || fail(404, 'no one with that handle or email');
+      if (them.id === me.id) fail(400, 'that is you');
+      if (!friendIds(me.id).includes(them.id)) fail(403, `you and @${them.handle} need to be friends first`);
+      c = one(`SELECT c.* FROM convos c WHERE c.kind='dm' AND c.id IN (SELECT convo_id FROM convo_members WHERE user_id=:a) AND c.id IN (SELECT convo_id FROM convo_members WHERE user_id=:b)`, { a: me.id, b: them.id });
+      if (!c) {
+        const id = rid(9);
+        run(`INSERT INTO convos(id,kind,agents,created_by,created,last) VALUES(:id,'dm',:a,:u,:t,:t)`, { id, a: JSON.stringify({ [me.id]: !!isAgent(me), [them.id]: false }), u: me.id, t: now() });
+        addMember(id, me.id, 'owner'); addMember(id, them.id, 'owner');
+        c = one('SELECT * FROM convos WHERE id=:id', { id });
+        emit([them.id], 'convo', () => ({ convo: id }));
+      }
+    } else {
+      const name = String(body.name || '').trim().slice(0, 80) || fail(400, 'give the group a name');
+      const id = rid(9);
+      run(`INSERT INTO convos(id,kind,name,invite,agents,created_by,created,last) VALUES(:id,'group',:n,:i,:a,:u,:t,:t)`,
+        { id, n: name, i: rid(12), a: JSON.stringify({ [me.id]: body.agent ?? isAgent(me) }), u: me.id, t: now() });
+      addMember(id, me.id, 'owner');
+      for (const h of [].concat(body.people || [])) {
+        const f = one('SELECT id FROM users WHERE handle=:h', { h: String(h).replace(/^@/, '') });
+        if (f && friendIds(me.id).includes(f.id)) { addMember(id, f.id); emit([f.id], 'convo', () => ({ convo: id })); }
+      }
+      c = one('SELECT * FROM convos WHERE id=:id', { id });
+    }
+    return { convo: convoOut(convoOf(c.id, me.id), me) };
+  });
+  // "@bob" (your direct conversation), a group name or an id -> the conversation, for commands and agents.
+  r('GET', '/api/convos/resolve', false, ({ me, query }) => {
+    const ref = String(query.get('ref') || '').trim(), list = chatList(me);
+    const h = ref.replace(/^@/, '').toLowerCase();
+    const hits = list.filter((c) => c.id === ref || (c.kind === 'dm' && c.members.some((x) => x.handle === h && x.id !== me.id)) || (c.kind === 'group' && c.name.toLowerCase() === ref.toLowerCase()));
+    if (hits.length !== 1) fail(hits.length ? 409 : 404, hits.length ? `several conversations match ${ref}; use an id: ${hits.map((c) => c.id).join(', ')}` : `no conversation ${ref}; list them with skillnet chats`);
+    return { convo: hits[0] };
+  });
+  r('GET', '/api/convos/([\\w-]+)', false, ({ me, m, query }) => {
+    const c = convoOf(m[1], me.id);
+    if (isAgent(me) && !agentsOn(c)[me.id]) fail(403, 'your agent is turned off in this conversation; its owner can turn it on');
+    const since = Number(query.get('since') || 0);
+    const msgs = all('SELECT * FROM messages WHERE convo_id=:c AND created>:s ORDER BY created DESC LIMIT 200', { c: c.id, s: since }).reverse()
+      .filter((x) => sees(x, me.id, isAgent(me), c));
+    if (!isAgent(me)) run('UPDATE convo_members SET read=:t WHERE convo_id=:c AND user_id=:u', { t: now(), c: c.id, u: me.id });
+    return { convo: convoOut(c, me), messages: msgs.map(msgOut), permissions: grantsFor(me.id, c.id) };
+  });
+  r('PATCH', '/api/convos/([\\w-]+)', false, ({ me, m, body }) => {
+    const c = convoOf(m[1], me.id);
+    if (body.agent !== undefined) {
+      if (isAgent(me) && body.agent) fail(403, 'only you can bring your agent into a conversation');
+      setAgent(c.id, me.id, body.agent);
+    }
+    if (body.name !== undefined) {
+      if (c.kind !== 'group' || c.my_role !== 'owner') fail(403, 'only the group owner can rename it');
+      run('UPDATE convos SET name=:n WHERE id=:id', { n: String(body.name).trim().slice(0, 80) || c.name, id: c.id });
+    }
+    emit(memberIds(c.id), 'convo', () => ({ convo: c.id }));
+    return { convo: convoOut(convoOf(c.id, me.id), me) };
+  });
+  r('POST', '/api/convos/([\\w-]+)/invite', false, ({ me, m }) => {
+    const c = convoOf(m[1], me.id);
+    if (c.kind !== 'group' || c.my_role !== 'owner') fail(403, 'only the group owner can reset the invite link');
+    const invite = rid(12);
+    run('UPDATE convos SET invite=:i WHERE id=:id', { i: invite, id: c.id });
+    return { invite: `${baseUrl}/c?code=${invite}` };
+  });
+  // Anyone in a group can share its link; joining brings you in, your agent stays out until you turn it on.
+  r('GET', '/api/convos/invite/([\\w-]+)', PUBLIC_ROUTE, ({ m }) => {
+    const c = one(`SELECT * FROM convos WHERE invite=:i AND kind='group'`, { i: m[1] }) || fail(404, 'that invite link is wrong or was reset');
+    const people = all('SELECT u.handle, u.name FROM convo_members cm JOIN users u ON u.id=cm.user_id WHERE cm.convo_id=:c ORDER BY cm.read DESC LIMIT 6', { c: c.id });
+    return { name: c.name, people: people.length, faces: people.map((p) => p.name || p.handle), agents: Object.values(agentsOn(c)).filter(Boolean).length };
+  });
+  r('POST', '/api/convos/join', false, ({ me, body }) => {
+    const code = String(body.code || '').replace(/^.*code=/, '');
+    const c = one(`SELECT * FROM convos WHERE invite=:i AND kind='group'`, { i: code }) || fail(404, 'that invite link is wrong or was reset');
+    const fresh = !one('SELECT 1 x FROM convo_members WHERE convo_id=:c AND user_id=:u', { c: c.id, u: me.id });
+    addMember(c.id, me.id);
+    if (fresh) {
+      const id = rid(9), t = now();
+      run(`INSERT INTO messages(id,convo_id,user_id,kind,text,status,created) VALUES(:id,:c,:u,'joined','',:s,:t)`, { id, c: c.id, u: me.id, s: 'sent', t });
+      run('UPDATE convos SET last=:t WHERE id=:c', { t, c: c.id });
+      broadcast(c, one('SELECT * FROM messages WHERE id=:id', { id }));
+    }
+    return { convo: convoOut(convoOf(c.id, me.id), me) };
+  });
+  r('DELETE', '/api/convos/([\\w-]+)/members/me', false, ({ me, m }) => {
+    const c = convoOf(m[1], me.id);
+    if (isAgent(me)) fail(403, 'only you can leave a conversation');
+    run('DELETE FROM convo_members WHERE convo_id=:c AND user_id=:u', { c: c.id, u: me.id });
+    setAgent(c.id, me.id, false);
+    if (!memberIds(c.id).length) run('DELETE FROM convos WHERE id=:id', { id: c.id });
+    return { ok: true };
+  });
+
+  r('POST', '/api/convos/([\\w-]+)/messages', false, ({ me, m, body }) => {
+    const c = convoOf(m[1], me.id), agent = isAgent(me);
+    const kind = String(body.kind || 'chat');
+    if (!KINDS.includes(kind)) fail(400, `kind must be one of ${KINDS.join(', ')}`);
+    const text = String(body.text || '').trim().slice(0, 20000);
+    let data = null;
+    if (kind === 'skill') {
+      const ref = String(body.skill || '').replace(/^@/, '') || fail(400, 'say which skill to share, like acme/handbook');
+      const [owner, name] = ref.includes('/') ? ref.split('/') : [null, ref];
+      const s = one(`SELECT ${SKILL_COLS} FROM ${SKILL_FROM} WHERE ${VISIBLE} AND (s.id=:ref OR (s.name=:n AND (:o IS NULL OR coalesce(u.handle, o.slug)=:o)))`, { u: me.id, ref, n: name, o: owner })
+        || fail(404, `no skill ${ref} that you can see`);
+      const blind = memberIds(c.id).filter((u) => !one(`SELECT 1 x FROM ${SKILL_FROM} WHERE s.id=:id AND ${VISIBLE}`, { id: s.id, u }));
+      if (blind.length) fail(403, `${s.owner}/${s.name} is ${s.visibility}: not everyone here can see it. Make it public or friends-only first.`);
+      data = { skill: { id: s.id, ref: `${s.owner}/${s.name}`, description: s.description, version: s.version } };
+    } else if (!text) fail(400, 'write something');
+    let status = 'sent';
+    if (agent) {
+      if (!agentsOn(c)[me.id]) fail(403, 'your agent is turned off in this conversation; its owner can turn it on');
+      const may = mode(me.id, c.id, 'out', kind);
+      if (may === 'never') fail(403, `your owner does not let you send "${KIND_LABELS[kind]}" here; say so to the people in the chat or ask your owner`);
+      // Loop guard: agents cannot talk among themselves forever without a person.
+      const lastHuman = one(`SELECT max(created) t FROM messages WHERE convo_id=:c AND agent IS NULL AND kind!='joined'`, { c: c.id }).t || 0;
+      if (one(`SELECT count(*) n FROM messages WHERE convo_id=:c AND agent IS NOT NULL AND status='sent' AND created>:t`, { c: c.id, t: lastHuman }).n >= AGENT_RUN)
+        fail(429, `agents have sent ${AGENT_RUN} messages here without a person replying; wait for one`);
+      if (may === 'ask') status = 'held';
+    }
+    const id = rid(9), t = Math.max(now(), (one('SELECT max(created) t FROM messages WHERE convo_id=:c', { c: c.id }).t || 0) + 1);
+    run('INSERT INTO messages(id,convo_id,user_id,agent,kind,text,data,status,created) VALUES(:id,:c,:u,:a,:k,:x,:d,:s,:t)',
+      { id, c: c.id, u: me.id, a: agent ? me.tlabel : null, k: kind, x: text, d: data && JSON.stringify(data), s: status, t });
+    if (status === 'sent') run('UPDATE convos SET last=:t WHERE id=:c', { t, c: c.id });
+    if (!agent) run('UPDATE convo_members SET read=:t WHERE convo_id=:c AND user_id=:u', { t, c: c.id, u: me.id });
+    const msg = one('SELECT * FROM messages WHERE id=:id', { id });
+    broadcast(c, msg);
+    return { message: msgOut(msg), note: status === 'held' ? 'held for your owner to approve before anyone else sees it' : undefined };
+  });
+  // Your agent's held messages: approve sends it, decline keeps it from everyone (it stays in your own history).
+  const heldMsg = (id, me) => {
+    if (isAgent(me)) fail(403, 'only the person can approve what their agent says');
+    return one(`SELECT * FROM messages WHERE id=:id AND user_id=:u AND status='held'`, { id, u: me.id }) || fail(404, 'no held message with that id');
+  };
+  r('POST', '/api/messages/([\\w-]+)/approve', false, ({ me, m, body }) => {
+    const x = heldMsg(m[1], me), t = now();
+    const text = body.text !== undefined ? String(body.text).trim().slice(0, 20000) || x.text : x.text;
+    run(`UPDATE messages SET status='sent', text=:x, created=:t WHERE id=:id`, { id: x.id, x: text, t });
+    run('UPDATE convos SET last=:t WHERE id=:c', { t, c: x.convo_id });
+    if (body.always) run('INSERT OR REPLACE INTO grants VALUES(:u,:o,\'out\',:k,\'allow\')', { u: me.id, o: x.convo_id, k: x.kind });
+    const msg = one('SELECT * FROM messages WHERE id=:id', { id: x.id });
+    broadcast({ id: x.convo_id }, msg);
+    return { message: msgOut(msg) };
+  });
+  r('POST', '/api/messages/([\\w-]+)/decline', false, ({ me, m }) => {
+    const x = heldMsg(m[1], me);
+    run(`UPDATE messages SET status='declined' WHERE id=:id`, { id: x.id });
+    broadcast({ id: x.convo_id }, one('SELECT * FROM messages WHERE id=:id', { id: x.id }));
+    return { ok: true };
+  });
+  // Permissions: what your agent may send ("out") and what it is shown ("in"), for one conversation or as your default ('*').
+  r('GET', '/api/permissions', false, ({ me, query }) => {
+    const cid = query.get('convo') || '*';
+    if (cid !== '*') convoOf(cid, me.id);
+    return { convo: cid, permissions: grantsFor(me.id, cid), kinds: KIND_LABELS, defaults: cid === '*' ? DEFAULT_GRANTS : grantsFor(me.id, '__none__') };
+  });
+  r('PUT', '/api/permissions', false, ({ me, body }) => {
+    if (isAgent(me)) fail(403, 'only you can change what your agent may say');
+    const cid = body.convo || '*';
+    if (cid !== '*') convoOf(cid, me.id);
+    for (const dir of ['out', 'in']) for (const [k, v] of Object.entries(body[dir] || {})) {
+      if (!KINDS.includes(k)) fail(400, `unknown kind ${k}`);
+      if (v === null) { run('DELETE FROM grants WHERE owner=:u AND other=:o AND dir=:d AND kind=:k', { u: me.id, o: cid, d: dir, k }); continue; }
+      if (!(dir === 'out' ? ['allow', 'ask', 'never'] : ['allow', 'never']).includes(v)) fail(400, `${dir} ${k} must be ${dir === 'out' ? 'allow, ask or never' : 'allow or never'}`);
+      run('INSERT OR REPLACE INTO grants VALUES(:u,:o,:d,:k,:v)', { u: me.id, o: cid, d: dir, k, v });
+    }
+    return { convo: cid, permissions: grantsFor(me.id, cid) };
+  });
   // What this user's machines should have: installed skills they can still see, plus every required skill of their organizations,
   // plus the built-in skillnet guide.
   const manifest = (u) => [
@@ -528,6 +773,7 @@ export function createApp({ db, baseUrl = '' }) {
   r('GET', '/api/events', false, ({ me, req, res }) => {
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
     res.write(`event: hello\ndata: {}\n\n`);
+    res.human = me.tkind === 'web';
     if (!streams.has(me.id)) streams.set(me.id, new Set());
     streams.get(me.id).add(res);
     const ping = setInterval(() => res.write(': ping\n\n'), 25e3);
@@ -586,13 +832,36 @@ export function createApp({ db, baseUrl = '' }) {
         const r = await call(me, 'POST', `/api/skills/${s.id}/proposals`, { files: { ...cur, ...fileMap(a) }, note: a.note });
         return `Suggested change ${r.proposal.id} sent to the editors of ${r.proposal.skill}.`;
       }],
+    ['list_conversations', 'Chats you are in (direct and group, with people and their agents), whether you (the agent) take part in each, and unread counts.',
+      {}, [],
+      async (me) => (await call(me, 'GET', '/api/convos')).convos.map((c) => `${c.id}  ${c.kind === 'dm' ? `with ${c.name}` : `group "${c.name}"`}  ${c.members.map((x) => `@${x.handle}${x.agent ? '+agent' : ''}`).join(' ')}  ${c.my_agent ? 'you take part' : 'you are off here'}${c.unread ? `, ${c.unread} unread` : ''}`).join('\n') || 'No conversations yet.'],
+    ['read_conversation', 'Read recent messages in a conversation, plus what your owner lets you send there.',
+      { conversation: str('@handle for a direct chat, a group name, or an id'), since: { type: 'number', description: 'only messages after this time (ms)' } }, ['conversation'],
+      async (me, a) => {
+        const c = (await call(me, 'GET', `/api/convos/resolve?ref=${encodeURIComponent(a.conversation)}`)).convo;
+        const d = await call(me, 'GET', `/api/convos/${c.id}?since=${a.since || 0}`);
+        return [`${d.convo.kind === 'dm' ? `Direct with ${d.convo.name}` : `Group "${d.convo.name}"`} (${c.id})`, permText(d.permissions), '',
+          ...d.messages.map(msgText)].join('\n');
+      }],
+    ['send_message', 'Send a message to a conversation as your owner\'s agent. Label it honestly with its kind; your owner decides per kind whether it goes straight out, waits for their approval, or is not allowed.',
+      { conversation: str('@handle, group name or id'), text: str('the message'), kind: str(`one of ${KINDS.join(', ')}: chat (talk, answers), question, task (asking someone to do work), skill (share one; give skill), personal (anything about your owner: calendar, contacts, files, places)`),
+        skill: str('for kind skill: owner/name') }, ['conversation'],
+      async (me, a) => {
+        const c = (await call(me, 'GET', `/api/convos/resolve?ref=${encodeURIComponent(a.conversation)}`)).convo;
+        const r = await call(me, 'POST', `/api/convos/${c.id}/messages`, a);
+        return r.message.status === 'held' ? `Held: your owner approves "${r.message.kind}" messages before they go out. Tell them it is waiting.` : `Sent (${r.message.id}).`;
+      }],
   ];
+  // Plain-text forms shared by the MCP tools and the command line.
+  const MODE_WORDS = { allow: 'yes', ask: 'after your owner approves', never: 'no' };
+  const permText = (p) => `You may send here: ${KINDS.map((k) => `${k} ${MODE_WORDS[p.out[k]]}`).join('; ')}. You are shown: ${KINDS.filter((k) => p.in[k] === 'allow').join(', ')}.`;
+  const msgText = (m) => `[${new Date(m.created).toISOString().slice(0, 16).replace('T', ' ')}] ${m.agent ? `@${m.from.handle}'s agent` : `@${m.from.handle}`}${m.kind === 'chat' ? '' : ` (${m.kind})`}${m.status === 'sent' ? '' : ` [${m.status}]`}: ${m.kind === 'joined' ? 'joined' : m.kind === 'skill' ? `shared skill ${m.data.skill.ref}: ${m.data.skill.description} ${m.text}` : m.text}`;
   // The person's skill list goes in the server instructions, which agents load at session start (like native skills: name and when to
   // use it up front, full text on demand through read_skill). Clients cut instructions at 4,096 characters.
   const instructions = (me) => {
-    const head = `Skillnet holds the shared skills of @${me.handle}. Each line below is a skill and when to use it. When a task matches one, `
+    const head = `Skillnet holds the shared skills of @${me.handle} and their conversations with people and other agents (list_conversations, read_conversation, send_message; stay within what your owner allows). Each line below is a skill and when to use it. When a task matches one, `
       + `call read_skill with its name first and follow it; read other files it mentions with read_skill and path. `
-      + `Use search_skills for skills not listed. For questions about sharing or changing skills, read skillnet/skillnet.\n\nSkills:\n`;
+      + `Use search_skills for skills not listed. For questions about sharing or changing skills, or chatting, read skillnet/skillnet.\n\nSkills:\n`;
     let out = head;
     for (const s of manifest(me.id)) {
       const line = `- ${s.owner}/${s.name}: ${(s.description || '').replace(/\s+/g, ' ')}\n`;
@@ -760,7 +1029,7 @@ echo "Done. Add ~/.local/bin to your PATH if 'skillnet' is not found."
       if (!open && !me) fail(401, 'sign in first');
       if (me?.scope === 'read' && req.method !== 'GET' && url.pathname !== '/api/mcp') fail(403, 'this API key is read-only; make a write key to publish');
       let body = {};
-      if (['POST', 'PATCH', 'DELETE'].includes(req.method)) {
+      if (['POST', 'PATCH', 'PUT', 'DELETE'].includes(req.method)) {
         // JSON-only bodies: browsers cannot send these cross-site without a preflight, which blocks cookie-riding requests.
         if (req.headers['content-length'] !== '0' && req.headers['content-type'] && !req.headers['content-type'].startsWith('application/json')) fail(415, 'send JSON');
         const text = await readBody(req);

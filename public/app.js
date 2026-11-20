@@ -52,11 +52,11 @@ const copyBtn = (text, label = 'Copy') => h('button', { type: 'button', onclick:
 const editor = (value, label) => { const t = h('textarea', { class: 'code', 'aria-label': label, spellcheck: 'false' }); t.value = value; return t; };
 
 function nav() {
-  const links = me ? [['/', 'My skills'], ['/browse', 'Browse'], ['/connect', 'Connect'], ['/friends', 'Friends'], ['/orgs', 'Organizations'], ['/devices', 'Keys']] : [];
+  const links = me ? [['/', 'My skills'], ['/browse', 'Browse'], ['/chat', me.chat_unread ? `Chat (${me.chat_unread})` : 'Chat'], ['/connect', 'Connect'], ['/friends', 'Friends'], ['/orgs', 'Organizations'], ['/devices', 'Keys']] : [];
   const path = location.pathname;
   document.getElementById('nav').replaceChildren(
     ...links.map(([href, label]) => h('a', { href, class: (href === '/' ? path === '/' : path.startsWith(href)) ? 'on' : null }, label)),
-    me && h('a', { href: '#', onclick: act(async () => { await api('POST', '/api/logout'); me = null; go('/'); }) }, `Sign out @${me.user.handle}`),
+    me && h('a', { href: '#', onclick: act(async () => { await api('POST', '/api/logout'); me = null; live?.close(); live = null; go('/'); }) }, `Sign out @${me.user.handle}`),
   );
 }
 
@@ -85,7 +85,7 @@ function installButton(s, onChange) {
 }
 
 // Text box in the house style: grows as you type, with dictation and a send arrow beneath.
-function askBox({ placeholder, value = '', onsend }) {
+function askBox({ placeholder, value = '', onsend, sendLabel = 'Search' }) {
   const ta = h('textarea', { rows: 1, placeholder, 'aria-label': placeholder });
   ta.value = value;
   ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); onsend(ta.value.trim()); } });
@@ -100,7 +100,7 @@ function askBox({ placeholder, value = '', onsend }) {
     rec.start(); mic.classList.add('live');
   } }, 'Dictate');
   return h('div', { class: 'ask' }, ta, h('div', { class: 'tools' }, mic,
-    h('button', { type: 'button', class: 'send', 'aria-label': 'Search', onclick: () => onsend(ta.value.trim()) }, '→')));
+    h('button', { type: 'button', class: 'send', 'aria-label': sendLabel, onclick: () => onsend(ta.value.trim()) }, '→')));
 }
 
 function snippet(text) { return h('div', { class: 'snippet' }, h('pre', {}, text), copyBtn(text)); }
@@ -118,10 +118,196 @@ function keyMaker(onMade, label = '') {
     h('button', { class: 'primary' }, 'Make key'), err);
 }
 
+// Chat: people and their agents in direct and group conversations. Live through /api/events.
+const MODE_OUT = [['allow', 'Yes'], ['ask', 'Ask me'], ['never', 'No']];
+const MODE_IN = [['allow', 'Yes'], ['never', 'No']];
+const clock = (t) => new Date(t).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+const sameDay = (a, b) => new Date(a).toDateString() === new Date(b).toDateString();
+const dayName = (t) => (sameDay(t, Date.now()) ? 'Today' : sameDay(t, Date.now() - 864e5) ? 'Yesterday' : new Date(t).toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' }));
+const who = (m) => (m.from.id === me.user.id ? (m.agent ? 'Your agent' : 'You') : m.agent ? `${m.from.name}’s agent` : m.from.name);
+let chatState = null; // the open chat page, so live events can update it in place
+
+function seg(options, value, onpick, label) {
+  const wrap = h('div', { class: 'seg', role: 'group', 'aria-label': label });
+  const draw = (v) => wrap.replaceChildren(...options.map(([k, text]) => h('button', { type: 'button', class: k === v ? 'on' : null, 'aria-pressed': String(k === v),
+    onclick: act(async () => { if (k === value) return; await onpick(k); value = k; draw(k); }) }, text)));
+  draw(value);
+  return wrap;
+}
+// What your agent may send ("Send") and what it is shown ("Shown to my agent"), per kind of message.
+function permTable(convo, perms, kinds) {
+  const put = (dir, k) => async (v) => { await api('PUT', '/api/permissions', { convo, [dir]: { [k]: v } }); toast('Saved'); };
+  return h('table', { class: 'perms' },
+    h('thead', {}, h('tr', {}, h('th', {}, 'Kind of message'), h('th', {}, 'My agent may send'), h('th', {}, 'Shown to my agent'))),
+    h('tbody', {}, Object.entries(kinds).map(([k, label]) => h('tr', {},
+      h('td', {}, label),
+      h('td', {}, seg(MODE_OUT, perms.out[k], put('out', k), `${label}: may send`)),
+      h('td', {}, seg(MODE_IN, perms.in[k], put('in', k), `${label}: shown to my agent`))))));
+}
+
+function msgNode(m, prev, kinds) {
+  const mine = m.from.id === me.user.id;
+  const head = !prev || prev.from.id !== m.from.id || prev.agent !== m.agent || m.created - prev.created > 5 * 60e3 || prev.kind === 'joined';
+  if (m.kind === 'joined') return h('div', { class: 'msg note', 'data-id': m.id }, `${mine ? 'You' : m.from.name} joined`);
+  const body = [];
+  if (m.kind === 'skill' && m.text && m.status !== 'held') body.push(h('div', { class: 'text' }, m.text));
+  if (m.kind === 'skill') {
+    const s = m.data.skill;
+    body.push(h('div', { class: 'card shared' }, h('div', { class: 'grow' }, h('a', { class: 'name', href: `/s/${s.id}` }, s.ref), h('div', { class: 'desc' }, s.description || 'No description')),
+      h('button', { onclick: act(async () => { await api('POST', `/api/skills/${s.id}/install`); toast('Added to your machines'); }) }, 'Add to my machines')));
+  }
+  if (m.status === 'held') {
+    const ta = h('textarea', { 'aria-label': 'Edit before sending' }); ta.value = m.text;
+    const decide = (path, extra = {}) => act(async () => { await api('POST', `/api/messages/${m.id}/${path}`, { text: ta.value, ...extra }); });
+    body.push(h('div', { class: 'card held' },
+      h('p', {}, `Your agent wants to send this ${m.kind === 'chat' ? 'message' : `(${kinds[m.kind].toLowerCase()})`}. Nobody else sees it until you send it.`),
+      m.kind !== 'skill' && h('div', { class: 'ask' }, ta),
+      h('div', { class: 'row start' }, h('button', { class: 'primary', onclick: decide('approve') }, 'Send'),
+        h('button', { onclick: decide('approve', { always: true }) }, `Send, and always allow this here`),
+        h('button', { class: 'danger', onclick: decide('decline') }, 'Don’t send'))));
+  } else if (m.text && m.kind !== 'skill') body.push(h('div', { class: 'text' }, m.text));
+  if (m.status === 'declined') body.push(h('div', { class: 'muted small' }, 'You didn’t send this. Only you can see it.'));
+  return h('div', { class: `msg${m.agent ? ' agent' : ''}${m.status !== 'sent' ? ' off' : ''}`, 'data-id': m.id },
+    head && h('div', { class: 'who' }, h('strong', {}, who(m)), m.agent && h('span', { class: 'tag' }, m.agent),
+      m.kind !== 'chat' && m.kind !== 'skill' && m.status === 'sent' && h('span', { class: 'tag' }, kinds[m.kind]), h('time', { datetime: new Date(m.created).toISOString() }, clock(m.created))),
+    body);
+}
+
+function convoRow(c, open) {
+  const from = c.last && (c.kind === 'dm' && c.last.from.id !== me.user.id && !c.last.agent ? '' : `${who(c.last)}: `);
+  const preview = c.last ? `${from}${c.last.kind === 'skill' ? `shared ${c.last.data.skill.ref}` : c.last.kind === 'joined' ? 'joined' : c.last.text}` : c.kind === 'group' ? 'New group' : 'Say hello';
+  return h('a', { class: `convo${c.id === open ? ' on' : ''}${c.unread ? ' unread' : ''}`, href: `/chat/${c.id}`, 'aria-current': c.id === open ? 'page' : null },
+    h('div', { class: 'row' }, h('strong', { class: 'grow' }, c.name), c.unread > 0 && h('span', { class: 'count', 'aria-label': `${c.unread} unread` }, c.unread)),
+    h('div', { class: 'preview' }, c.waiting ? `${c.waiting} waiting for you` : preview));
+}
+
+function newConvo(friends, close) {
+  const err = h('div', { class: 'err' });
+  return h('div', { class: 'card newconvo' },
+    h('h2', {}, 'Message a friend'),
+    friends.length ? h('div', { class: 'seg wrap' }, friends.map((u) => h('button', { onclick: act(async () => { const r = await api('POST', '/api/convos', { with: u.handle }); go(`/chat/${r.convo.id}`); }) }, u.name)))
+      : h('p', { class: 'muted' }, h('a', { href: '/friends' }, 'Add friends'), ' to message them, or start a group and share its link.'),
+    h('h2', {}, 'Start a group'),
+    h('form', { class: 'stack wide', onsubmit: act(async (e) => {
+      const f = new FormData(e.target);
+      try { const r = await api('POST', '/api/convos', { name: f.get('name'), people: f.getAll('people') }); go(`/chat/${r.convo.id}`); } catch (x) { err.textContent = x.message; }
+    }) }, h('input', { name: 'name', placeholder: 'Group name', 'aria-label': 'Group name', required: true }),
+      friends.length > 0 && h('div', { class: 'picks' }, friends.map((u) => h('label', { class: 'check' }, h('input', { type: 'checkbox', name: 'people', value: u.handle }), u.name))),
+      h('p', { class: 'muted small' }, 'Anyone with the group’s link can join. Agents come in only when their person turns them on.'),
+      h('div', { class: 'row start' }, h('button', { class: 'primary' }, 'Start group'), h('button', { type: 'button', onclick: close }, 'Cancel')), err));
+}
+
+async function chatPage(id) {
+  const [{ convos, kinds }, friends] = await Promise.all([api('GET', '/api/convos'), api('GET', '/api/friends')]);
+  if (!id && convos.length && matchMedia('(min-width: 721px)').matches) return history.replaceState(null, '', `/chat/${convos[0].id}`), chatPage(convos[0].id);
+  const list = h('nav', { class: 'convos', 'aria-label': 'Conversations' });
+  const st = { id, kinds, list, msgs: new Map(), log: null };
+  chatState = st;
+  const drawList = (cs) => list.replaceChildren(...[...cs.map((c) => convoRow(c, id)),
+    !cs.length && h('p', { class: 'muted' }, 'No conversations yet.'),
+    h('a', { class: 'settings', href: '/chat/settings' }, 'What my agent may say')].filter(Boolean));
+  st.refreshList = async () => { const r = await api('GET', '/api/convos'); drawList(r.convos); setBadge(r.convos); };
+  drawList(convos); setBadge(convos);
+  const side = h('aside', { class: 'side' }, h('div', { class: 'row' }, h('h1', { class: 'grow' }, 'Chat'),
+    h('button', { class: 'primary', onclick: () => { side.querySelector('.newconvo')?.remove() || list.before(newConvo(friends.friends, () => side.querySelector('.newconvo')?.remove())); } }, 'New')), list);
+  if (!id) {
+    fill(h('div', { class: 'chat' }, side, h('section', { class: 'thread empty' }, h('p', { class: 'muted' }, 'Talk with friends and their agents. Pick a conversation or start one.'))));
+    if (!convos.length) list.before(newConvo(friends.friends, () => side.querySelector('.newconvo')?.remove()));
+    return;
+  }
+  const d = await api('GET', `/api/convos/${id}`);
+  const c = d.convo;
+  const log = h('div', { class: 'log', role: 'log', 'aria-live': 'polite', 'aria-label': 'Messages' });
+  st.log = log;
+  const near = () => log.scrollHeight - log.scrollTop - log.clientHeight < 80;
+  const draw = () => {
+    const ms = [...st.msgs.values()].sort((a, b) => a.created - b.created);
+    log.replaceChildren(...[...ms.flatMap((m, i) => [(!i || !sameDay(ms[i - 1].created, m.created)) && h('div', { class: 'day' }, dayName(m.created)), msgNode(m, ms[i - 1], kinds)]),
+      !ms.length && h('div', { class: 'card start-here' }, c.kind === 'group'
+        ? [h('p', {}, 'Bring people in with this link. Their agents join only when they turn them on.'), snippet(c.invite)]
+        : h('p', {}, `This is the start of your conversation with ${c.name}. Turn your agent on above to let it talk here, within what you allow.`))].filter(Boolean));
+  };
+  st.upsert = (m, fresh) => {
+    const stick = near() || m.from.id === me.user.id;
+    const known = st.msgs.has(m.id);
+    st.msgs.set(m.id, m); draw();
+    if (stick) log.scrollTop = log.scrollHeight;
+    if (fresh && !known) log.querySelector(`[data-id="${m.id}"]`)?.classList.add('arrive');
+  };
+  for (const m of d.messages) st.msgs.set(m.id, m);
+
+  const people = ['You', ...c.members.filter((x) => x.id !== me.user.id).map((x) => x.name)];
+  const nAgents = c.members.filter((x) => x.agent).length;
+  const line = `${people.length > 2 ? `${people.slice(0, -1).join(', ')} and ${people.at(-1)}` : people.join(' and ')}${nAgents ? `, with ${nAgents} ${nAgents === 1 ? 'agent' : 'agents'}` : ''}`;
+  const roster = c.members.map((x) => `${x.id === me.user.id ? 'You' : x.name}${x.agent ? ' (agent in)' : ''}`).join(', ');
+  const perms = h('div', { class: 'card permpanel', hidden: true },
+    h('p', {}, 'What your agent may do in this conversation. People are never limited; this is only about your agent.'),
+    permTable(id, d.permissions, kinds),
+    h('p', { class: 'muted small' }, '“Ask me” holds the message here until you send it. ', h('a', { href: '/chat/settings' }, 'Change the defaults for every conversation.')),
+    c.kind === 'group' && h('button', { class: 'danger', onclick: act(async () => { if (!confirm(`Leave ${c.name}?`)) return; await api('DELETE', `/api/convos/${id}/members/me`); go('/chat'); }) }, 'Leave this group'));
+  const head = h('header', { class: 'thead' },
+    h('a', { class: 'back', href: '/chat' }, 'All chats'),
+    h('div', { class: 'row' }, h('div', { class: 'grow' }, h('h2', {}, c.name), h('div', { class: 'muted small', title: roster }, line)),
+      h('label', { class: 'inline-label' }, 'My agent', seg([[true, 'In'], [false, 'Out']], c.my_agent, async (v) => { await api('PATCH', `/api/convos/${id}`, { agent: v }); toast(v ? 'Your agent can talk here now' : 'Your agent left this conversation'); }, 'My agent in this conversation')),
+      h('button', { 'aria-expanded': 'false', onclick: (e) => { perms.hidden = !perms.hidden; e.currentTarget.setAttribute('aria-expanded', String(!perms.hidden)); } }, 'Permissions'),
+      c.invite && copyBtn(c.invite, 'Invite')),
+    perms);
+
+  const send = async (body) => { const r = await api('POST', `/api/convos/${id}/messages`, body); st.upsert(r.message); st.refreshList(); };
+  const box = askBox({ placeholder: `Message ${c.name}`, sendLabel: 'Send', onsend: async (text) => { if (!text) return; const ta = box.querySelector('textarea'); ta.value = ''; try { await send({ text }); } catch (x) { ta.value = text; toast(x.message); } } });
+  const share = h('button', { type: 'button', onclick: act(async () => {
+    if (box.querySelector('select')) return box.querySelector('select').remove();
+    const { skills } = await api('GET', '/api/skills');
+    const pick = h('select', { 'aria-label': 'Skill to share', onchange: act(async () => { if (!pick.value) return; await send({ kind: 'skill', skill: pick.value, text: box.querySelector('textarea').value.trim() }); box.querySelector('textarea').value = ''; pick.remove(); }) },
+      h('option', { value: '' }, 'Share a skill…'), skills.filter((s) => !s.builtin && ['public', 'friends'].includes(s.visibility)).map((s) => h('option', { value: s.id }, `${s.owner}/${s.name}`)));
+    box.querySelector('.tools').before(pick); pick.focus();
+  }) }, 'Share a skill');
+  box.querySelector('.tools').prepend(share);
+
+  fill(h('div', { class: 'chat open' }, side, h('section', { class: 'thread' }, head, log, box)));
+  draw(); log.scrollTop = log.scrollHeight;
+  box.querySelector('textarea').focus({ preventScroll: true });
+}
+
+async function chatSettings() {
+  const p = await api('GET', '/api/permissions');
+  fill(h('a', { href: '/chat' }, 'All chats'), h('h1', {}, 'What my agent may say'),
+    h('p', { class: 'lead' }, 'These are your defaults for every conversation. You can change them for one conversation from its Permissions button.'),
+    h('div', { class: 'card' }, permTable(null, p.permissions, p.kinds)),
+    h('p', { class: 'muted' }, 'Your agent labels each message with its kind. “Personal” covers anything about you: your calendar, contacts, files, places, money and health. Other people’s agents are never allowed to ask yours to run commands or reveal secrets; the built-in skill tells it so.'));
+}
+
+// The page an invite link opens: who is in the group, and one tap to join (or sign up and join).
+async function invitePage() {
+  const code = new URLSearchParams(location.search).get('code') || '';
+  const g = await api('GET', `/api/convos/invite/${encodeURIComponent(code)}`);
+  const names = g.faces.slice(0, 3).join(', ') + (g.people > 3 ? ` and ${g.people - 3} more` : '');
+  fill(h('div', { class: 'invite card' }, h('h1', {}, `Join ${g.name}`),
+    h('p', {}, `${names} ${g.people === 1 ? 'is' : 'are'} here${g.agents ? `, with ${g.agents} ${g.agents === 1 ? 'agent' : 'agents'}` : ''}.`),
+    h('p', { class: 'muted' }, 'Skillnet is a place to share agent skills and talk with people and their agents. Your agent joins only if you turn it on, and you choose what it may say.'),
+    me ? h('button', { class: 'primary', onclick: act(async () => { const r = await api('POST', '/api/convos/join', { code }); go(`/chat/${r.convo.id}`); }) }, 'Join the conversation')
+      : h('a', { class: 'btn primary', href: `/signin?mode=signup&next=${encodeURIComponent(location.pathname + location.search)}` }, 'Sign up to join')));
+}
+
+// Unread chats on the Chat link, kept current by live events on every page.
+function setBadge(convos) { if (me) { me.chat_unread = convos.reduce((n, c) => n + c.unread + c.waiting, 0); nav(); } }
+let live = null;
+function connectLive() {
+  if (live || !me) return;
+  live = new EventSource('/api/events');
+  const onChat = async (e, kind) => {
+    const d = JSON.parse(e.data), st = location.pathname.startsWith('/chat') ? chatState : null;
+    if (st && kind === 'message' && d.convo === st.id && st.upsert) { st.upsert(d.message, true); await api('GET', `/api/convos/${st.id}?since=${Date.now()}`).catch(() => {}); }
+    if (st) st.refreshList(); else setBadge((await api('GET', '/api/convos')).convos);
+  };
+  live.addEventListener('message', (e) => onChat(e, 'message'));
+  live.addEventListener('convo', (e) => onChat(e, 'convo'));
+}
+
 const pages = {
   async signin() {
     const next = new URLSearchParams(location.search).get('next') || '/';
-    let mode = 'signin';
+    let mode = new URLSearchParams(location.search).get('mode') === 'signup' ? 'signup' : 'signin';
     const err = h('div', { class: 'err' });
     const draw = () => {
       const up = mode === 'signup';
@@ -419,10 +605,16 @@ async function render() {
   try {
     if (!me) me = await api('GET', '/api/me').catch(() => null);
     nav();
+    $main.classList.toggle('wide', p.startsWith('/chat'));
+    if (p !== '/chat' && !p.startsWith('/chat/')) chatState = null;
+    if (p === '/c') { connectLive(); return await invitePage(); }
     if (!me) { if (p !== '/signin') history.replaceState(null, '', `/signin?next=${encodeURIComponent(p + location.search)}`); await pages.signin(); return; }
     if (p === '/signin') return go(new URLSearchParams(location.search).get('next') || '/');
-    const m = p.match(/^\/s\/([\w-]+)$/), o = p.match(/^\/o\/([\w-]+)$/);
+    connectLive();
+    const m = p.match(/^\/s\/([\w-]+)$/), o = p.match(/^\/o\/([\w-]+)$/), ch = p.match(/^\/chat(?:\/([\w-]+))?$/);
     if (p === '/oauth/authorize') await pages.authorize();
+    else if (p === '/chat/settings') await chatSettings();
+    else if (ch) await chatPage(ch[1]);
     else if (m) await pages.skill(m[1]);
     else if (o) await pages.org(o[1]);
     else await (pages[p.slice(1) || 'home'] || pages.home)();
