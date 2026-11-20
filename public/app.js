@@ -319,60 +319,63 @@ const pages = {
 
   async devices() {
     const { tokens } = await api('GET', '/api/tokens');
-    const keys = tokens.filter((t) => t.kind === 'key'), machines = tokens.filter((t) => t.kind !== 'key');
+    const keys = tokens.filter((t) => t.kind === 'key'), apps = tokens.filter((t) => t.kind === 'connector'), machines = tokens.filter((t) => t.kind === 'cli');
     const row = (t, sub) => h('div', { class: 'card row' },
       h('div', { class: 'grow' }, h('strong', {}, t.label), h('div', { class: 'muted' }, `${sub}Added ${when(t.created)}, last used ${when(t.used)}`)),
       h('button', { class: 'danger', onclick: act(async () => { if (!confirm(`Revoke ${t.label}? Anything using it stops syncing.`)) return; await api('DELETE', `/api/tokens/${t.id}`); render(); }) }, 'Revoke'));
     fill(h('h1', {}, 'Keys and devices'),
-      h('p', { class: 'lead' }, 'API keys are for cloud runs and tools: put one in a secret named SKILLNET_KEY. Read keys sync and search; write keys can also publish.'),
-      keyMaker(() => render()),
+      h('h2', {}, 'Connected apps'),
+      h('div', { class: 'list' }, apps.length ? apps.map((t) => row(t, `${t.scope === 'write' ? 'Read and write' : 'Read only'}. `)) : h('p', { class: 'muted' }, 'None yet. See Connect.')),
       h('h2', {}, 'API keys'),
+      h('p', { class: 'muted' }, 'Only for scripts and cloud jobs with no one there to sign in: put one in a secret named SKILLNET_KEY. Read keys sync and search; write keys can also publish.'),
+      keyMaker(() => render()),
       h('div', { class: 'list' }, keys.length ? keys.map((t) => row(t, `${t.scope === 'write' ? 'Read and write' : 'Read only'}. `)) : h('p', { class: 'muted' }, 'No keys yet.')),
-      h('h2', {}, 'Signed-in machines'),
-      h('div', { class: 'list' }, machines.length ? machines.map((t) => row(t, '')) : h('p', { class: 'muted' }, 'No machines yet. See Connect.')));
+      machines.length && h('h2', {}, 'Signed-in machines'),
+      machines.length && h('div', { class: 'list' }, machines.map((t) => row(t, ''))));
   },
 
-  // Where people run agents, and the one thing to paste for each.
+  // Where people run agents. Apps connect by address and a browser sign-in; only scripts with no browser need a key.
   async connect() {
-    const origin = location.origin;
+    const origin = location.origin, url = `${origin}/mcp`;
     let key = sessionStorage.getItem('sn-new-key') || '';
-    const K = () => key || 'YOUR_KEY';
     const pull = () => `curl -fsSL -H "Authorization: Bearer $SKILLNET_KEY" ${origin}/api/pull.sh | sh`;
+    const steps = (...items) => h('ol', { class: 'steps' }, items.map((x) => h('li', {}, x)));
+    const signIn = 'Sign in to Skillnet in the window that opens and choose Allow.';
     const PLACES = {
-      computer: ['This computer', () => [
-        h('p', {}, 'Run this in a terminal (needs Node 22 or newer). It signs the machine in, puts your skills in every agent it finds (Claude Code, Pi, Codex, Cursor, Gemini) and keeps them updated in the background.'),
-        snippet(`curl -fsSL ${origin}/install.sh | sh`)]],
-      claude: ['Claude Code cloud', () => [
-        h('p', {}, 'In your Claude Code environment settings, add the secret SKILLNET_KEY, then add this to the setup script. Skills are in place before the session starts.'),
+      claude: ['Claude', () => [
+        steps('In Claude (desktop app, claude.ai or the phone app) open Settings, then Connectors, then Add custom connector.',
+          ['Name it Skillnet and paste this address:', snippet(url)], `Choose Connect. ${signIn}`),
+        h('p', {}, 'That covers Claude Code too, including cloud sessions. On a Team or Enterprise plan an owner can add it once for everyone in Organization settings, Connectors. If Claude Code asks, type /mcp and choose Skillnet to sign in.')]],
+      cursor: ['Cursor', () => [
+        h('p', {}, h('a', { class: 'btn primary', href: `cursor://anysphere.cursor-deeplink/mcp/install?name=skillnet&config=${btoa(JSON.stringify({ url }))}` }, 'Add to Cursor')),
+        h('p', {}, `Then choose Connect next to Skillnet in Cursor's MCP settings. ${signIn} Or add it by hand in Settings, MCP, with this address:`), snippet(url)]],
+      vscode: ['VS Code', () => [
+        h('p', {}, h('a', { class: 'btn primary', href: `vscode:mcp/install?${encodeURIComponent(JSON.stringify({ name: 'skillnet', type: 'http', url }))}` }, 'Add to VS Code')),
+        h('p', {}, `Then start the server when VS Code asks. ${signIn}`)]],
+      chatgpt: ['ChatGPT', () => [
+        steps('In ChatGPT open Settings, then Apps and Connectors, then Create (turn on developer mode under Advanced if you do not see it).',
+          ['Name it Skillnet, paste this address and choose OAuth:', snippet(url)], signIn)]],
+      other: ['Codex, Grok and others', () => [
+        h('p', {}, `Any app that takes a remote MCP server: add one with this address. No key or header is needed; ${signIn.toLowerCase()}`), snippet(url),
+        h('p', {}, 'For apps that take a config file:'), snippet(JSON.stringify({ mcpServers: { skillnet: { url } } }, null, 2))]],
+      scripts: ['Scripts and cloud jobs', () => [
+        h('p', {}, 'Only for jobs with no one there to sign in, like CI. Make a key, store it as a secret named SKILLNET_KEY, and this line writes your skills into the agent folders:'),
+        key ? h('p', { class: 'card notice' }, 'Your new key: ', h('code', {}, key), ' ', copyBtn(key), h('br'), 'Copy it now; it is not shown again.')
+          : keyMaker((k) => { key = k; sessionStorage.setItem('sn-new-key', k); draw(); }, 'Cloud job'),
         snippet(pull()),
-        h('p', {}, 'Or put it in the repository, in .claude/settings.json, so it runs at the start of every session:'),
-        snippet(JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: 'command', command: pull() }] }] } }, null, 2))]],
-      cursor: ['Cursor background agents', () => [
-        h('p', {}, 'Add SKILLNET_KEY as a secret for background agents, then set the install step in .cursor/environment.json:'),
-        snippet(JSON.stringify({ install: pull() }, null, 2))]],
-      codex: ['Codex cloud', () => [h('p', {}, 'Add SKILLNET_KEY as a secret in the environment, and this line to its setup script:'), snippet(pull())]],
-      mcp: ['Grok, ChatGPT and other MCP clients', () => [
-        h('p', {}, 'For agents without skill folders. Add a remote MCP server with this address and header. Its tools search and read skills, show who can change them, and publish or suggest changes.'),
-        snippet(`${origin}/mcp`), snippet(`Authorization: Bearer ${K()}`),
-        h('p', {}, 'As JSON for clients that take a config file:'),
-        snippet(JSON.stringify({ mcpServers: { skillnet: { url: `${origin}/mcp`, headers: { Authorization: `Bearer ${K()}` } } } }, null, 2))]],
-      api: ['Anything else', () => [
-        h('p', {}, 'Any script, CI job or agent can use the API with the key as a bearer token. The pull script works anywhere with sh, curl and base64; choose folders with SKILLNET_DIRS.'),
-        snippet(pull()), snippet(`SKILLNET_DIRS=./.claude/skills ${pull().replace('| sh', '| sh')}`),
-        snippet(`curl -H "Authorization: Bearer $SKILLNET_KEY" "${origin}/api/skills?q=deploy"`)]],
+        h('p', {}, 'Or call the API with the key as a bearer token:'), snippet(`curl -H "Authorization: Bearer $SKILLNET_KEY" "${origin}/api/skills?q=deploy"`)]],
     };
-    let place = new URLSearchParams(location.search).get('for') || 'computer';
+    let place = new URLSearchParams(location.search).get('for');
+    if (!PLACES[place]) place = 'claude';
     const body = h('div', { class: 'stack-gap' });
     const tabs = h('div', { class: 'seg wrap', role: 'tablist' });
     const draw = () => {
       tabs.replaceChildren(...Object.entries(PLACES).map(([k, [label]]) => h('button', { role: 'tab', 'aria-selected': String(k === place), class: k === place ? 'on' : null,
         onclick: () => { place = k; history.replaceState(null, '', `/connect?for=${k}`); draw(); } }, label)));
-      const keyStep = place !== 'computer' && (key ? h('p', { class: 'card notice' }, 'Your new key: ', h('code', {}, key), ' ', copyBtn(key), h('br'), 'Copy it now; it is not shown again.')
-        : h('div', {}, h('p', {}, '1. Make an API key for it:'), keyMaker((k) => { key = k; sessionStorage.setItem('sn-new-key', k); draw(); }, PLACES[place][0])));
-      body.replaceChildren(...[keyStep, ...PLACES[place][1]()].filter(Boolean));
+      body.replaceChildren(...PLACES[place][1]().filter(Boolean));
     };
     fill(h('h1', {}, 'Connect an agent'),
-      h('p', { class: 'lead' }, 'Pick where your agent runs. Once connected, it gets your skills and the skillnet skill, so you can ask it about skills and change them without leaving the chat.'),
+      h('p', { class: 'lead' }, 'Add Skillnet to your app by its address and sign in. Your agent then sees your skills at the start of every session, and updates show up without reinstalling anything.'),
       tabs, body);
     draw();
   },
@@ -386,6 +389,21 @@ const pages = {
         try { const r = await api('POST', '/api/device/approve', { user_code: new FormData(e.target).get('code') }); fill(h('h1', {}, 'Approved'), h('p', {}, `${r.label} is signed in. You can close this tab.`)); }
         catch (x) { msg.textContent = x.message; }
       }) }, h('label', { for: 'd-code' }, 'Code'), h('input', { id: 'd-code', name: 'code', value: code, required: true, autocapitalize: 'characters' }), h('button', { class: 'primary' }, 'Approve'), msg));
+  },
+
+  // The OAuth consent screen an app opens when someone adds Skillnet as a connector.
+  async authorize() {
+    const q = new URLSearchParams(location.search);
+    const p = Object.fromEntries(['client_id', 'redirect_uri', 'code_challenge', 'code_challenge_method', 'state'].map((k) => [k, q.get(k)]));
+    const scopes = (q.get('scope') || '').split(/\s+/);
+    const scope = scopes.includes('read') && !scopes.includes('write') ? 'read' : 'write';
+    const c = await api('GET', `/api/oauth/client?client_id=${encodeURIComponent(p.client_id || '')}&redirect_uri=${encodeURIComponent(p.redirect_uri || '')}`);
+    const send = (allow) => act(async () => { location.href = (await api('POST', '/api/oauth/approve', { ...p, scope, allow })).redirect; });
+    fill(h('h1', {}, `Connect ${c.name}`),
+      h('p', { class: 'lead' }, `${c.name} wants to use Skillnet as @${me.user.handle}. It will be able to:`),
+      h('ul', {}, h('li', {}, 'Read your skills, your friends\' and your organizations\''), scope === 'write' && h('li', {}, 'Publish skills and suggest changes in your name')),
+      h('p', { class: 'muted' }, `You go back to ${c.host} after this. Disconnect it any time on the Keys page.`),
+      h('div', { class: 'inline' }, h('button', { class: 'primary', onclick: send(true) }, 'Allow'), h('button', { onclick: send(false) }, 'Cancel')));
   },
 
   async join() {
@@ -404,7 +422,8 @@ async function render() {
     if (!me) { if (p !== '/signin') history.replaceState(null, '', `/signin?next=${encodeURIComponent(p + location.search)}`); await pages.signin(); return; }
     if (p === '/signin') return go(new URLSearchParams(location.search).get('next') || '/');
     const m = p.match(/^\/s\/([\w-]+)$/), o = p.match(/^\/o\/([\w-]+)$/);
-    if (m) await pages.skill(m[1]);
+    if (p === '/oauth/authorize') await pages.authorize();
+    else if (m) await pages.skill(m[1]);
     else if (o) await pages.org(o[1]);
     else await (pages[p.slice(1) || 'home'] || pages.home)();
   } catch (e) {

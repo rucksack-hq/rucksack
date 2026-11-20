@@ -37,7 +37,7 @@ label { display: block; font-size: 14px; color: var(--muted); margin: 10px 0 4px
 input, select, textarea { width: 100%; font: inherit; color: var(--ink); background: var(--card); border: 1px solid var(--line); border-radius: var(--r); padding: 8px 10px; }
 textarea { resize: none; display: block; field-sizing: content; min-height: 1.5em; border: 0; padding: 0; background: transparent; }
 button, .btn { font: inherit; border: 1px solid var(--line); background: var(--card); color: var(--ink); border-radius: var(--r); padding: 6px 12px; cursor: pointer; text-decoration: none; display: inline-block; }
-button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+button.primary, .btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 button.danger { color: var(--warn); }
 button:active:not(:disabled), .btn:active { transform: translateY(1px); }
 button:disabled { background: var(--soft); color: var(--muted); border-color: var(--line); cursor: not-allowed; }
@@ -88,3 +88,7 @@ label.check { display: flex; gap: 6px; align-items: center; margin: 0; color: va
 label.check input { width: auto; }
 details summary { cursor: pointer; color: var(--muted); margin-top: 8px; }
 [hidden] { display: none !important; }
+.steps { padding-left: 1.3em; }
+.steps li { margin: 8px 0; }
+.steps .snippet { margin-top: 6px; }
+.inline.wrap + .list { margin-top: 12px; }

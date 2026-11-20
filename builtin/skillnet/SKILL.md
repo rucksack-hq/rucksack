@@ -10,13 +10,15 @@ Answer the user's questions yourself with the commands below; do not send them t
 
 ## Pick the way in
 
-1. `skillnet` command on PATH: use it (add `--json` to any command for exact data).
-2. No command but `SKILLNET_KEY` is set (cloud runs): run it without installing:
+1. Skillnet connector tools available (search_skills, read_skill, skill_info, my_account, publish_skill, suggest_change): use them. This is the usual way in.
+2. `skillnet` command on PATH: use it (add `--json` to any command for exact data).
+3. No command but `SKILLNET_KEY` is set (cloud runs): run it without installing:
    `curl -fsSL {{URL}}/cli/skillnet.js -o /tmp/skillnet.js && node /tmp/skillnet.js <command>`
    It reads `SKILLNET_KEY` and `SKILLNET_URL` (default {{URL}}).
-3. No Node: call the HTTP API with `curl -H "Authorization: Bearer $SKILLNET_KEY" {{URL}}/api/...`
+4. No Node: call the HTTP API with `curl -H "Authorization: Bearer $SKILLNET_KEY" {{URL}}/api/...`
    (`/api/me`, `/api/skills?q=`, `/api/resolve?ref=owner/name`, `/api/skills/<id>`, `/api/skills/<id>/file?path=`).
-4. If the Skillnet MCP tools are connected (search_skills, read_skill, skill_info, my_account, publish_skill, suggest_change), those work too.
+
+To connect a new app, the user adds a custom connector (remote MCP server) with the address {{URL}}/mcp and signs in; the Connect page has steps per app.
 
 Not signed in: `skillnet login {{URL}}` prints a link and code; tell the user to open it and approve.
 

@@ -22,7 +22,7 @@ export function openDb(file) {
   if (file !== ':memory:') fs.mkdirSync(path.dirname(file), { recursive: true });
   const db = new DatabaseSync(file);
   db.exec(`
-    PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
+    PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;
     CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, handle TEXT UNIQUE NOT NULL,
       name TEXT NOT NULL, pw TEXT NOT NULL, created INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS tokens(id TEXT PRIMARY KEY, hash TEXT UNIQUE NOT NULL, user_id TEXT NOT NULL REFERENCES users ON DELETE CASCADE,
@@ -45,9 +45,14 @@ export function openDb(file) {
     CREATE TABLE IF NOT EXISTS proposals(id TEXT PRIMARY KEY, skill_id TEXT NOT NULL REFERENCES skills ON DELETE CASCADE,
       user_id TEXT NOT NULL REFERENCES users ON DELETE CASCADE, base_version INTEGER NOT NULL, bundle TEXT NOT NULL, note TEXT NOT NULL DEFAULT '',
       status TEXT NOT NULL DEFAULT 'open', created INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS oauth_clients(id TEXT PRIMARY KEY, name TEXT NOT NULL, redirect_uris TEXT NOT NULL, created INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS oauth_codes(hash TEXT PRIMARY KEY, client_id TEXT NOT NULL, user_id TEXT NOT NULL REFERENCES users ON DELETE CASCADE,
+      redirect_uri TEXT NOT NULL, challenge TEXT NOT NULL, scope TEXT NOT NULL, created INTEGER NOT NULL);
   `);
   // Columns added after the first release.
-  for (const sql of [`ALTER TABLE tokens ADD COLUMN scope TEXT NOT NULL DEFAULT 'write'`, `ALTER TABLE skills ADD COLUMN body TEXT NOT NULL DEFAULT ''`])
+  for (const sql of [`ALTER TABLE tokens ADD COLUMN scope TEXT NOT NULL DEFAULT 'write'`, `ALTER TABLE skills ADD COLUMN body TEXT NOT NULL DEFAULT ''`,
+    // Connector sign-ins (OAuth): a 'connector' row is the long-lived grant holding the refresh token; its short 'oauth' access tokens point at it.
+    `ALTER TABLE tokens ADD COLUMN expires INTEGER`, `ALTER TABLE tokens ADD COLUMN grant_id TEXT`, `ALTER TABLE tokens ADD COLUMN client TEXT`])
     try { db.exec(sql); } catch (e) { if (!/duplicate column/.test(e.message)) throw e; }
   return db;
 }
@@ -135,13 +140,15 @@ export function createApp({ db, baseUrl = '' }) {
     run('INSERT INTO tokens(id,hash,user_id,kind,label,created,scope) VALUES(:id,:h,:u,:k,:l,:c,:s)', { id: rid(8), h: sha(token), u: userId, k: kind, l: label, c: now(), s: scope });
     return token;
   }
-  function auth(req) {
+  // bearerOnly: the MCP endpoint ignores the browser cookie, so other websites cannot call it as the signed-in person.
+  function auth(req, bearerOnly = false) {
     const bearer = /^Bearer (\S+)$/.exec(req.headers.authorization || '')?.[1];
-    const cookie = /(?:^|;\s*)sn=([^;]+)/.exec(req.headers.cookie || '')?.[1];
+    const cookie = bearerOnly ? null : /(?:^|;\s*)sn=([^;]+)/.exec(req.headers.cookie || '')?.[1];
     const tok = bearer || cookie;
     if (!tok) return null;
-    const row = one('SELECT t.id tid, t.scope, u.* FROM tokens t JOIN users u ON u.id=t.user_id WHERE t.hash=:h', { h: sha(tok) });
-    if (row) run('UPDATE tokens SET used=:n WHERE id=:id', { n: now(), id: row.tid });
+    const row = one(`SELECT t.id tid, t.kind tkind, t.scope, t.grant_id, u.* FROM tokens t JOIN users u ON u.id=t.user_id
+      WHERE t.hash=:h AND t.kind!='connector' AND (t.expires IS NULL OR t.expires>:n)`, { h: sha(tok), n: now() });
+    if (row) run('UPDATE tokens SET used=:n WHERE id IN (:id, :g)', { n: now(), id: row.tid, g: row.grant_id || row.tid });
     return row || null;
   }
 
@@ -243,7 +250,7 @@ export function createApp({ db, baseUrl = '' }) {
     run('UPDATE devices SET user_id=:u, token=:t WHERE device_code=:d', { u: me.id, t: issueToken(me.id, 'cli', d.label), d: d.device_code });
     return { ok: true, label: d.label };
   });
-  r('GET', '/api/tokens', false, ({ me }) => ({ tokens: all(`SELECT id, kind, scope, label, created, used FROM tokens WHERE user_id=:u AND kind IN ('cli','key') ORDER BY created DESC`, { u: me.id }) }));
+  r('GET', '/api/tokens', false, ({ me }) => ({ tokens: all(`SELECT id, kind, scope, label, created, used FROM tokens WHERE user_id=:u AND kind IN ('cli','key','connector') ORDER BY created DESC`, { u: me.id }) }));
   // API keys for cloud runs and tools that cannot do the device sign-in. "read" keys sync and search only.
   r('POST', '/api/keys', false, ({ me, body }) => {
     const scope = body.scope || 'read';
@@ -251,7 +258,39 @@ export function createApp({ db, baseUrl = '' }) {
     const label = String(body.label || '').trim().slice(0, 80) || fail(400, 'give the key a name, like "Cursor cloud"');
     return { key: issueToken(me.id, 'key', label, scope), label, scope };
   });
-  r('DELETE', '/api/tokens/([\\w-]+)', false, ({ me, m }) => { run('DELETE FROM tokens WHERE id=:id AND user_id=:u', { id: m[1], u: me.id }); return { ok: true }; });
+  r('DELETE', '/api/tokens/([\\w-]+)', false, ({ me, m }) => { run('DELETE FROM tokens WHERE (id=:id OR grant_id=:id) AND user_id=:u', { id: m[1], u: me.id }); return { ok: true }; });
+
+  // Connector sign-in (OAuth 2.1 with PKCE, as MCP clients expect). The browser page /oauth/authorize asks the person; these two routes back it.
+  const getClient = (id) => one('SELECT * FROM oauth_clients WHERE id=:id', { id: String(id || '') }) || fail(400, 'unknown app; remove the connector and add it again');
+  const LOOPBACK = ['localhost', '127.0.0.1', '[::1]'];
+  const redirectOk = (client, uri) => {
+    let x; try { x = new URL(uri); } catch { return false; }
+    return JSON.parse(client.redirect_uris).some((r) => {
+      if (r === uri) return true;
+      const y = new URL(r); // native apps pick a free port each time (RFC 8252)
+      return x.protocol === 'http:' && LOOPBACK.includes(x.hostname) && y.protocol === 'http:' && y.hostname === x.hostname && y.pathname === x.pathname;
+    });
+  };
+  r('GET', '/api/oauth/client', false, ({ query }) => {
+    const c = getClient(query.get('client_id'));
+    if (!redirectOk(c, query.get('redirect_uri'))) fail(400, 'this app sent an address it did not register');
+    return { name: c.name, host: new URL(query.get('redirect_uri')).host || new URL(query.get('redirect_uri')).protocol };
+  });
+  r('POST', '/api/oauth/approve', false, ({ me, body }) => {
+    if (me.tkind !== 'web') fail(403, 'approve this in your browser');
+    const c = getClient(body.client_id);
+    if (!redirectOk(c, body.redirect_uri)) fail(400, 'this app sent an address it did not register');
+    const to = new URL(body.redirect_uri);
+    if (body.state) to.searchParams.set('state', body.state);
+    to.searchParams.set('iss', baseUrl);
+    if (!body.allow) { to.searchParams.set('error', 'access_denied'); return { redirect: to.href }; }
+    if (body.code_challenge_method !== 'S256' || !/^[\w-]{43,128}$/.test(body.code_challenge || '')) fail(400, 'this app did not send a PKCE challenge');
+    const code = rid(24);
+    run('INSERT INTO oauth_codes VALUES(:h,:c,:u,:r,:ch,:s,:t)', { h: sha(code), c: c.id, u: me.id, r: body.redirect_uri, ch: body.code_challenge,
+      s: body.scope === 'read' ? 'read' : 'write', t: now() });
+    to.searchParams.set('code', code);
+    return { redirect: to.href };
+  });
 
   // Friends: a request is a row (a=requester, b=addressee, pending); accepting flips it to accepted.
   r('GET', '/api/friends', false, ({ me }) => {
@@ -449,8 +488,9 @@ export function createApp({ db, baseUrl = '' }) {
     ...all(`SELECT ${SKILL_COLS} FROM ${SKILL_FROM} WHERE s.version>0 AND (
         (s.id IN (SELECT skill_id FROM installs WHERE user_id=:u) AND ${VISIBLE})
         OR (s.required=1 AND s.owner_org IN (SELECT org_id FROM members WHERE user_id=:u))) ORDER BY s.name`, { u })
-      .map((s) => ({ id: s.id, owner: s.owner, name: s.name, version: s.version, hash: s.hash, required: !!s.required })),
-    { id: GUIDE_ID, owner: 'skillnet', name: 'skillnet', version: 1, hash: bundleHash(guideFiles(baseUrl)), required: true, builtin: true },
+      .map((s) => ({ id: s.id, owner: s.owner, name: s.name, version: s.version, hash: s.hash, required: !!s.required, description: s.description })),
+    { id: GUIDE_ID, owner: 'skillnet', name: 'skillnet', version: 1, hash: bundleHash(guideFiles(baseUrl)), required: true, builtin: true,
+      description: 'How to find, use, share and change skills on Skillnet, and who may change what.' },
   ];
   r('GET', '/api/manifest', false, ({ me }) => ({ skills: manifest(me.id) }));
   const bundleOf = (id, u) => {
@@ -547,12 +587,45 @@ export function createApp({ db, baseUrl = '' }) {
         return `Suggested change ${r.proposal.id} sent to the editors of ${r.proposal.skill}.`;
       }],
   ];
+  // The person's skill list goes in the server instructions, which agents load at session start (like native skills: name and when to
+  // use it up front, full text on demand through read_skill). Clients cut instructions at 4,096 characters.
+  const instructions = (me) => {
+    const head = `Skillnet holds the shared skills of @${me.handle}. Each line below is a skill and when to use it. When a task matches one, `
+      + `call read_skill with its name first and follow it; read other files it mentions with read_skill and path. `
+      + `Use search_skills for skills not listed. For questions about sharing or changing skills, read skillnet/skillnet.\n\nSkills:\n`;
+    let out = head;
+    for (const s of manifest(me.id)) {
+      const line = `- ${s.owner}/${s.name}: ${(s.description || '').replace(/\s+/g, ' ')}\n`;
+      if (out.length + line.length > 4000) { out += '- (more: use search_skills)\n'; break; }
+      out += line;
+    }
+    return out;
+  };
+  // Each skill is also a prompt, so it shows as a command (/mcp__skillnet__name in Claude Code).
+  const promptList = (me) => {
+    const seen = new Set();
+    return manifest(me.id).map((s) => {
+      const name = seen.has(s.name) ? `${s.owner}-${s.name}` : s.name;
+      seen.add(s.name);
+      return { name, title: `${s.owner}/${s.name}`, description: s.description, id: s.id };
+    });
+  };
   r('POST', '/api/mcp', false, async ({ me, body, res }) => {
     const reply = (result) => ({ jsonrpc: '2.0', id: body.id, result });
     if (body.id === undefined) { res.writeHead(202).end(); return undefined; } // notifications
-    if (body.method === 'initialize') return reply({ protocolVersion: body.params?.protocolVersion || '2025-06-18', capabilities: { tools: {} },
-      serverInfo: { name: 'skillnet', version: '1' }, instructions: 'Shared agent skills. Search and read skills, see who can change them, publish or suggest changes.' });
+    if (body.method === 'initialize') return reply({ protocolVersion: body.params?.protocolVersion || '2025-06-18', capabilities: { tools: {}, prompts: {} },
+      serverInfo: { name: 'skillnet', version: '1' }, instructions: instructions(me) });
     if (body.method === 'ping') return reply({});
+    if (body.method === 'prompts/list') return reply({ prompts: promptList(me).map(({ id, ...p }) => ({ ...p,
+      arguments: [{ name: 'request', description: 'what you want done', required: false }] })) });
+    if (body.method === 'prompts/get') {
+      const p = promptList(me).find((x) => x.name === body.params?.name);
+      if (!p) return { jsonrpc: '2.0', id: body.id, error: { code: -32602, message: `unknown prompt ${body.params?.name}` } };
+      const md = Buffer.from(bundleOf(p.id, me.id).files['SKILL.md'], 'base64').toString('utf8');
+      const ask = body.params.arguments?.request;
+      return reply({ description: p.description, messages: [{ role: 'user', content: { type: 'text',
+        text: `Use the skill ${p.title} (other files in it: read_skill with path).\n\n${md}${ask ? `\n\nRequest: ${ask}` : ''}` } }] });
+    }
     if (body.method === 'tools/list') return reply({ tools: TOOLS.map(([name, description, properties, required]) => ({ name, description, inputSchema: { type: 'object', properties, required } })) });
     if (body.method === 'tools/call') {
       const tool = TOOLS.find((t) => t[0] === body.params?.name);
@@ -588,8 +661,91 @@ echo "Done. Add ~/.local/bin to your PATH if 'skillnet' is not found."
     fs.createReadStream(file).pipe(res);
   }
 
+  const readBody = async (req) => {
+    const chunks = []; let n = 0;
+    for await (const c of req) { n += c.length; if (n > MAX_BUNDLE * 1.5) fail(413, 'request too large'); chunks.push(c); }
+    return Buffer.concat(chunks).toString('utf8');
+  };
+  const json = (res, status, out, headers = {}) => res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...headers }).end(JSON.stringify(out));
+  const MCP_URL = () => `${baseUrl}/mcp`;
+  const RESOURCE_META = () => `${baseUrl}/.well-known/oauth-protected-resource/mcp`;
+  const ACCESS_TTL = 3600e3;
+
+  // OAuth endpoints that MCP clients call themselves: discovery, app registration and the token exchange. Plain JSON or form bodies,
+  // reachable from any origin (no cookies are read here).
+  async function oauth(req, res, url) {
+    const p = url.pathname;
+    const asMeta = { issuer: baseUrl, authorization_endpoint: `${baseUrl}/oauth/authorize`, token_endpoint: `${baseUrl}/oauth/token`,
+      registration_endpoint: `${baseUrl}/oauth/register`, revocation_endpoint: `${baseUrl}/oauth/revoke`, response_types_supported: ['code'],
+      grant_types_supported: ['authorization_code', 'refresh_token'], code_challenge_methods_supported: ['S256'],
+      token_endpoint_auth_methods_supported: ['none'], scopes_supported: ['read', 'write'] };
+    if (p.startsWith('/.well-known/oauth-protected-resource'))
+      return json(res, 200, { resource: MCP_URL(), authorization_servers: [baseUrl], scopes_supported: ['read', 'write'], bearer_methods_supported: ['header'] });
+    if (p.startsWith('/.well-known/oauth-authorization-server') || p.startsWith('/.well-known/openid-configuration')) return json(res, 200, asMeta);
+    if (req.method !== 'POST') return json(res, 405, { error: 'invalid_request' }, { Allow: 'POST' });
+    const text = await readBody(req);
+    let b = {};
+    try { b = (req.headers['content-type'] || '').startsWith('application/json') ? JSON.parse(text || '{}') : Object.fromEntries(new URLSearchParams(text)); }
+    catch { return json(res, 400, { error: 'invalid_request', error_description: 'bad body' }); }
+    const bad = (error, error_description, status = 400) => json(res, status, { error, error_description });
+
+    if (p === '/oauth/register') {
+      const uris = Array.isArray(b.redirect_uris) ? b.redirect_uris.map(String) : [];
+      const safe = (u) => { try { const x = new URL(u); return !['javascript:', 'data:', 'file:', 'vbscript:', 'blob:'].includes(x.protocol) && !x.hash
+        && (x.protocol !== 'http:' || LOOPBACK.includes(x.hostname)); } catch { return false; } };
+      if (!uris.length || uris.length > 10 || !uris.every(safe)) return bad('invalid_redirect_uri', 'redirect_uris must be https, a loopback http address or an app link');
+      const id = `snc_${rid(12)}`, name = String(b.client_name || 'An MCP app').slice(0, 80);
+      run('INSERT INTO oauth_clients VALUES(:id,:n,:r,:t)', { id, n: name, r: JSON.stringify(uris), t: now() });
+      return json(res, 201, { client_id: id, client_name: name, redirect_uris: uris, client_id_issued_at: Math.floor(now() / 1000),
+        grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'], token_endpoint_auth_method: 'none' });
+    }
+    if (p === '/oauth/revoke') {
+      const h = sha(String(b.token || ''));
+      const t = one('SELECT id, kind, grant_id FROM tokens WHERE hash=:h AND kind IN (\'oauth\',\'connector\')', { h });
+      if (t) run('DELETE FROM tokens WHERE id=:g OR grant_id=:g', { g: t.kind === 'connector' ? t.id : t.grant_id });
+      return json(res, 200, {});
+    }
+    if (p !== '/oauth/token') return bad('invalid_request', 'not found', 404);
+
+    let grant;
+    if (b.grant_type === 'authorization_code') {
+      const c = one('SELECT * FROM oauth_codes WHERE hash=:h', { h: sha(String(b.code || '')) });
+      if (c) run('DELETE FROM oauth_codes WHERE hash=:h', { h: c.hash }); // single use
+      run('DELETE FROM oauth_codes WHERE created<:t', { t: now() - 10 * 60e3 });
+      if (!c || now() - c.created > 10 * 60e3 || c.client_id !== b.client_id || c.redirect_uri !== b.redirect_uri) return bad('invalid_grant', 'code is wrong, used or expired');
+      if (crypto.createHash('sha256').update(String(b.code_verifier || '')).digest('base64url') !== c.challenge) return bad('invalid_grant', 'PKCE check failed');
+      const client = getClient(c.client_id);
+      grant = { id: rid(8), user: c.user_id, scope: c.scope };
+      run(`INSERT INTO tokens(id,hash,user_id,kind,label,created,scope,client) VALUES(:id,'pending-' || :id,:u,'connector',:l,:c,:s,:cl)`,
+        { id: grant.id, u: c.user_id, l: client.name, c: now(), s: c.scope, cl: client.id });
+    } else if (b.grant_type === 'refresh_token') {
+      const t = one(`SELECT * FROM tokens WHERE hash=:h AND kind='connector'`, { h: sha(String(b.refresh_token || '')) });
+      if (!t || (b.client_id && t.client !== b.client_id)) return bad('invalid_grant', 'sign in again');
+      grant = { id: t.id, user: t.user_id, scope: t.scope };
+    } else return bad('unsupported_grant_type', 'use authorization_code or refresh_token');
+
+    // Rotate: new refresh token on the same grant row, old access tokens of this grant end.
+    const refresh = `snr_${rid(32)}`, access = `sn_${rid(32)}`;
+    run('UPDATE tokens SET hash=:h WHERE id=:id', { h: sha(refresh), id: grant.id });
+    run(`DELETE FROM tokens WHERE grant_id=:g OR (kind='oauth' AND expires<:n)`, { g: grant.id, n: now() });
+    run(`INSERT INTO tokens(id,hash,user_id,kind,label,created,scope,expires,grant_id) VALUES(:id,:h,:u,'oauth','access',:c,:s,:e,:g)`,
+      { id: rid(8), h: sha(access), u: grant.user, c: now(), s: grant.scope, e: now() + ACCESS_TTL, g: grant.id });
+    return json(res, 200, { access_token: access, token_type: 'Bearer', expires_in: ACCESS_TTL / 1000, refresh_token: refresh, scope: grant.scope });
+  }
+
   async function handle(req, res) {
     const url = new URL(req.url, 'http://x');
+    const isMcp = url.pathname === '/mcp' || url.pathname === '/api/mcp';
+    const machine = isMcp || url.pathname.startsWith('/.well-known/') || ['/oauth/token', '/oauth/register', '/oauth/revoke'].includes(url.pathname);
+    if (machine) {
+      // Any origin may call these with a bearer token; cookies are never read on them.
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Access-Control-Expose-Headers', 'WWW-Authenticate, Mcp-Session-Id');
+      if (req.method === 'OPTIONS') return res.writeHead(204, { 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Authorization, Content-Type, Mcp-Protocol-Version, Mcp-Session-Id', 'Access-Control-Max-Age': '86400' }).end();
+      if (!isMcp) { try { return await oauth(req, res, url); } catch (e) { return json(res, e.status || 500, { error: 'invalid_request', error_description: e.status ? e.message : 'server error' }); } }
+      if (req.method !== 'POST') return res.writeHead(405, { Allow: 'POST' }).end();
+    }
     if (url.pathname === '/install.sh') return res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' }).end(installScript());
     const cli = /^\/cli\/(skillnet\.js|pi-skillnet-reload\.ts)$/.exec(url.pathname)?.[1];
     if (cli) return res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' }).end(fs.readFileSync(path.join(HERE, 'cli', cli)));
@@ -599,16 +755,15 @@ echo "Done. Add ~/.local/bin to your PATH if 'skillnet' is not found."
       const route = routes.find(([m, re]) => m === req.method && re.test(url.pathname));
       if (!route) fail(404, 'not found');
       const [, re, open, fn] = route;
-      const me = auth(req);
+      const me = auth(req, isMcp);
+      if (isMcp && !me) res.setHeader('WWW-Authenticate', `Bearer resource_metadata="${RESOURCE_META()}"`);
       if (!open && !me) fail(401, 'sign in first');
       if (me?.scope === 'read' && req.method !== 'GET' && url.pathname !== '/api/mcp') fail(403, 'this API key is read-only; make a write key to publish');
       let body = {};
       if (['POST', 'PATCH', 'DELETE'].includes(req.method)) {
         // JSON-only bodies: browsers cannot send these cross-site without a preflight, which blocks cookie-riding requests.
         if (req.headers['content-length'] !== '0' && req.headers['content-type'] && !req.headers['content-type'].startsWith('application/json')) fail(415, 'send JSON');
-        const chunks = []; let n = 0;
-        for await (const c of req) { n += c.length; if (n > MAX_BUNDLE * 1.5) fail(413, 'request too large'); chunks.push(c); }
-        const text = Buffer.concat(chunks).toString('utf8');
+        const text = await readBody(req);
         try { body = text ? JSON.parse(text) : {}; } catch { fail(400, 'bad JSON'); }
       }
       const out = await fn({ me, body, m: url.pathname.match(re), req, res, query: url.searchParams });

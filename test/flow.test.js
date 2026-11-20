@@ -218,3 +218,75 @@ test('accounts, friends, organizations, sync', async (t) => {
     await assert.rejects(cli.sync({ quiet: true }), /sign in/);
   });
 });
+
+test('connector sign-in (OAuth with PKCE), skill list in instructions, prompts, revoke', async () => {
+  const crypto = await import('node:crypto');
+  const form = async (p, fields) => { const r = await fetch(base + p, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(fields) }); return { http: r.status, ...(await r.json()) }; };
+  const rpc = async (token, method, params) => fetch(`${base}/mcp`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) });
+
+  // Unauthenticated MCP call points the client at the discovery document.
+  const r0 = await rpc(null, 'initialize', {});
+  assert.equal(r0.status, 401);
+  assert.match(r0.headers.get('www-authenticate'), /resource_metadata=".*\/\.well-known\/oauth-protected-resource\/mcp"/);
+  const prm = await (await fetch(`${base}/.well-known/oauth-protected-resource/mcp`)).json();
+  assert.equal(prm.resource, `${base}/mcp`);
+  const meta = await (await fetch(`${base}/.well-known/oauth-authorization-server`)).json();
+  assert.deepEqual(meta.code_challenge_methods_supported, ['S256']);
+  assert.equal((await fetch(`${base}/mcp`, { method: 'OPTIONS' })).headers.get('access-control-allow-origin'), '*');
+
+  // Registration rejects unsafe redirect addresses.
+  assert.equal((await as('anon', 'POST', '/oauth/register', { redirect_uris: ['http://evil.example/cb'] })).http, 400);
+  const reg = await as('anon', 'POST', '/oauth/register', { client_name: 'Claude', redirect_uris: ['http://127.0.0.1/callback', 'https://claude.ai/api/mcp/auth_callback'] });
+  assert.equal(reg.http, 201);
+
+  const verifier = crypto.randomBytes(32).toString('base64url');
+  const challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
+  const redirect_uri = 'http://127.0.0.1:53111/callback'; // any loopback port is fine
+  const q = `client_id=${reg.client_id}&redirect_uri=${encodeURIComponent(redirect_uri)}`;
+  assert.equal((await as('alice', 'GET', `/api/oauth/client?${q}`)).name, 'Claude');
+  assert.equal((await as('alice', 'GET', `/api/oauth/client?client_id=${reg.client_id}&redirect_uri=https://evil.example/cb`)).http, 400);
+
+  // A bearer token cannot approve on someone's behalf; the browser session can.
+  const ap = { client_id: reg.client_id, redirect_uri, code_challenge: challenge, code_challenge_method: 'S256', state: 'st8', allow: true };
+  const key = (await as('alice', 'POST', '/api/keys', { label: 'k', scope: 'write' })).key;
+  assert.equal((await as('anon', 'POST', '/api/oauth/approve', ap, { Authorization: `Bearer ${key}` })).http, 403);
+  const denied = new URL((await as('alice', 'POST', '/api/oauth/approve', { ...ap, allow: false })).redirect);
+  assert.equal(denied.searchParams.get('error'), 'access_denied');
+  const back = new URL((await as('alice', 'POST', '/api/oauth/approve', ap)).redirect);
+  assert.equal(back.searchParams.get('state'), 'st8');
+  const code = back.searchParams.get('code');
+
+  assert.equal((await form('/oauth/token', { grant_type: 'authorization_code', code, code_verifier: 'wrong'.repeat(10), client_id: reg.client_id, redirect_uri })).error, 'invalid_grant');
+  // The failed attempt used the code up, so get a fresh one.
+  const code2 = new URL((await as('alice', 'POST', '/api/oauth/approve', ap)).redirect).searchParams.get('code');
+  const tok = await form('/oauth/token', { grant_type: 'authorization_code', code: code2, code_verifier: verifier, client_id: reg.client_id, redirect_uri });
+  assert.equal(tok.http, 200);
+  assert.equal(tok.expires_in, 3600);
+  assert.equal((await form('/oauth/token', { grant_type: 'authorization_code', code: code2, code_verifier: verifier, client_id: reg.client_id, redirect_uri })).error, 'invalid_grant');
+
+  // Signed in: the skill list arrives in the instructions; skills are prompts; cookies are ignored on /mcp.
+  const init = await (await rpc(tok.access_token, 'initialize', {})).json();
+  assert.match(init.result.instructions, /acme\/handbook/);
+  assert.match(init.result.instructions, /skillnet\/skillnet/);
+  const prompts = (await (await rpc(tok.access_token, 'prompts/list')).json()).result.prompts;
+  assert.ok(prompts.some((p) => p.name === 'handbook'));
+  const got = (await (await rpc(tok.access_token, 'prompts/get', { name: 'handbook', arguments: { request: 'onboard Dana' } })).json()).result;
+  assert.match(got.messages[0].content.text, /Request: onboard Dana/);
+  assert.equal((await as('alice', 'POST', '/mcp', { jsonrpc: '2.0', id: 1, method: 'ping' })).http, 401);
+  // The refresh token is not an access token.
+  assert.equal((await rpc(tok.refresh_token, 'ping')).status, 401);
+
+  // Refresh rotates: the old refresh token and old access token stop working.
+  const tok2 = await form('/oauth/token', { grant_type: 'refresh_token', refresh_token: tok.refresh_token, client_id: reg.client_id });
+  assert.equal(tok2.http, 200);
+  assert.equal((await form('/oauth/token', { grant_type: 'refresh_token', refresh_token: tok.refresh_token, client_id: reg.client_id })).error, 'invalid_grant');
+  assert.equal((await rpc(tok.access_token, 'ping')).status, 401);
+  assert.equal((await rpc(tok2.access_token, 'ping')).status, 200);
+
+  // The app shows on the Keys page; revoking it ends both tokens.
+  const app_ = (await as('alice', 'GET', '/api/tokens')).tokens.find((t) => t.kind === 'connector');
+  assert.equal(app_.label, 'Claude');
+  await as('alice', 'DELETE', `/api/tokens/${app_.id}`);
+  assert.equal((await rpc(tok2.access_token, 'ping')).status, 401);
+  assert.equal((await form('/oauth/token', { grant_type: 'refresh_token', refresh_token: tok2.refresh_token, client_id: reg.client_id })).error, 'invalid_grant');
+});
