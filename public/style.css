@@ -1,15 +1,14 @@
-/* Hallmark · macrostructure: Utility app · tone: plain, calm · anchor hue: 165 · hero: none (signed-in tool) */
+/* Hallmark · macrostructure: Utility app · tone: plain, calm · theme: Cobalt tokens (tokens.css) · hero: none (signed-in tool) */
 /* Critique: dense tool screens, one accent, system type; no marketing chrome. */
 :root {
-  --bg: #fbfbfa; --card: #ffffff; --ink: #1d1d1b; --muted: #6b6a66; --line: #dcdad5; --soft: #f1f0ec;
-  --accent: #2f5d50; --accent-ink: #ffffff; --warn: #9a3b23; --ok: #2f6b3a;
-  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-  --mono: ui-monospace, "SF Mono", Menlo, monospace;
-  --r: 4px;
+  --bg: var(--color-paper); --card: oklch(100% 0 0); --ink: var(--color-ink); --muted: var(--color-muted); --line: var(--color-rule-2); --soft: var(--color-paper-2);
+  --accent: var(--color-accent); --accent-ink: var(--color-accent-ink); --warn: var(--color-error); --ok: var(--color-success);
+  --font: var(--font-body); --mono: var(--font-outlier);
+  --r: 6px;
 }
 @media (prefers-color-scheme: dark) {
-  :root { --bg: #141413; --card: #1c1c1a; --ink: #ecebe7; --muted: #9c9a94; --line: #34332f; --soft: #23231f;
-    --accent: #7fb8a4; --accent-ink: #10201b; --warn: #e08c72; --ok: #8bc796; }
+  :root { --bg: oklch(17% 0.02 262); --card: oklch(21% 0.024 262); --ink: oklch(93% 0.01 250); --muted: oklch(70% 0.02 256); --line: oklch(32% 0.026 262); --soft: oklch(25% 0.026 262);
+    --accent: oklch(74% 0.13 254); --accent-ink: oklch(18% 0.03 262); --warn: oklch(72% 0.14 30); --ok: oklch(76% 0.12 150); }
 }
 * { box-sizing: border-box; }
 html, body { overflow-x: clip; }
@@ -93,15 +92,15 @@ details summary { cursor: pointer; color: var(--muted); margin-top: 8px; }
 .steps .snippet { margin-top: 6px; }
 .inline.wrap + .list { margin-top: 12px; }
 
-/* Chat: a workspace layout (dark sidebar, flat message rows, square avatars), in Rucksack's green rather than another app's purple.
+/* Chat: a workspace layout (graphite sidebar, flat message rows, square avatars).
    Agents get the same avatar color as their person, outlined instead of filled, and an Agent tag. */
 :root {
-  --side: #1e3a32; --side-ink: #e6eee9; --side-muted: #a9bcb3; --side-hover: #2a4a40; --side-on: #4f8f7b; --side-line: #2f5046;
-  --hover: #f5f5f2; --held: #f1f6f3; --on-dark: #f7faf8; --badge: #a8391f;
+  --side: var(--color-graphite); --side-ink: var(--color-graphite-ink); --side-muted: var(--color-graphite-muted); --side-hover: var(--color-graphite-2); --side-on: var(--color-accent); --side-line: oklch(30% 0.026 262);
+  --hover: var(--color-paper-2); --held: var(--color-accent-wash); --on-dark: #f7faf8; --badge: #a8391f;
   --av0: #2f5d50; --av1: #8a4b2a; --av2: #3d5a8a; --av3: #7a3f6e; --av4: #5f6b2a; --av5: #2f6f7a;
 }
 @media (prefers-color-scheme: dark) {
-  :root { --side: #0f1c18; --side-hover: #1a2c26; --side-on: #2f6b5a; --side-line: #22352f; --hover: #20201d; --held: #18241f; }
+  :root { --side: oklch(14% 0.02 262); --side-hover: oklch(22% 0.026 262); --side-on: oklch(45% 0.17 258); --side-line: oklch(26% 0.026 262); --hover: oklch(23% 0.024 262); --held: oklch(24% 0.04 258); }
 }
 main.wide { max-width: none; padding: 0; }
 .chat { display: grid; grid-template-columns: 260px minmax(0, 1fr); height: calc(100dvh - var(--toph, 57px)); min-height: 420px; }

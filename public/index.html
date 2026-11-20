@@ -3,17 +3,142 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Rucksack</title>
-<meta name="description" content="Share agent skills with friends and your organization, synced to every agent on every machine.">
+<title>Rucksack: share skills and agent access</title>
+<meta name="description" content="Rucksack keeps your company’s agent skills in one place and decides which people and agents get them, in Claude Code, Claude, Cursor, Codex and ChatGPT.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Familjen+Grotesk:wght@500;600&family=IBM+Plex+Sans:wght@400;500&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/tokens.css">
 <link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/site.css">
 <script type="module" src="/app.js"></script>
 </head>
 <body>
 <header class="top">
-  <a class="brand" href="/">Rucksack</a>
+  <a class="brand" href="/"><svg class="mark" viewBox="0 0 20 20" aria-hidden="true"><path d="M5 7.5a5 5 0 0 1 10 0V17H5z" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M5 11h10M8 11v2.5h4V11" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>Rucksack</a>
   <nav id="nav"></nav>
 </header>
 <main id="main"><noscript><p>Rucksack needs JavaScript turned on.</p></noscript></main>
 <div id="toast" role="status" aria-live="polite"></div>
+
+<template id="landing-page">
+<section class="hero container">
+  <div class="hero-copy">
+    <h1>Share skills and agent access</h1>
+    <p class="lead">Keep your company’s agent skills in one place, and decide which people and agents get each one.</p>
+    <div class="cta">
+      <a class="key key--primary" href="/signin?mode=signup">Start free</a>
+      <a class="key" href="mailto:lance@servantventures.com?subject=Rucksack%20for%20our%20company">Talk to sales</a>
+    </div>
+    <p class="fine" data-plan-note>Free for up to 3 people. Team is $8 per person a month.</p>
+  </div>
+
+  <div class="hero-stage" aria-label="Example: an organization's skills in Rucksack, and an agent session that has them">
+    <div class="panel cut">
+      <div class="panel-head">
+        <span class="org">Harbor Roofing</span>
+        <span class="tabs"><span class="tab on">Skills</span><span class="tab">People</span><span class="tab">Connected apps</span></span>
+      </div>
+      <table class="ledger">
+        <thead><tr><th>Skill</th><th>Who gets it</th><th class="num">Version</th></tr></thead>
+        <tbody>
+          <tr class="hot"><td><code>estimate-writer</code></td><td>Everyone at Harbor <span class="status req">Required</span></td><td class="num">v12</td></tr>
+          <tr><td><code>permit-lookup</code></td><td>Everyone at Harbor</td><td class="num">v4</td></tr>
+          <tr><td><code>crm-notes</code></td><td>Everyone at Harbor <span class="status wait">1 change to review</span></td><td class="num">v7</td></tr>
+          <tr><td><code>my-shortcuts</code></td><td>Only me</td><td class="num">v2</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="session graphite cut">
+      <div class="session-head"><span>Claude Code</span><span class="ok">Signed in to Rucksack</span></div>
+      <pre><span class="you">&gt; what Rucksack skills do I have?</span>
+4 skills from Harbor Roofing.
+<span class="token">estimate-writer</span> is required: I use it
+for every roofing estimate.</pre>
+    </div>
+  </div>
+</section>
+
+<section class="works container" aria-label="Works with">
+  <p>Works with the agents your team already uses</p>
+  <ul><li>Claude Code</li><li>Claude</li><li>Cursor</li><li>Codex</li><li>ChatGPT</li><li>VS Code</li><li>Pi</li></ul>
+</section>
+
+<section class="how container" id="how">
+  <div class="sec-head">
+    <h2>From one skill to every agent</h2>
+    <p class="lead">A skill is a folder with a SKILL.md: the steps an agent follows for one job. Rucksack carries it to everyone who should have it.</p>
+  </div>
+  <ol class="steps3">
+    <li class="cut">
+      <span class="n">1</span>
+      <h3>Publish a skill</h3>
+      <p>Write it on the site or push a folder from the terminal. Every version is kept.</p>
+      <pre class="graphite mini">---
+name: estimate-writer
+description: Use when writing
+  a roofing estimate
+---</pre>
+    </li>
+    <li class="cut">
+      <span class="n">2</span>
+      <h3>Choose who gets it</h3>
+      <p>Just you, your friends, your whole company or everyone. Mark it required and no one can skip it.</p>
+      <div class="tray" aria-hidden="true"><span>Only me</span><span>Friends</span><span class="on">Harbor Roofing</span><span>Everyone</span></div>
+      <div class="switch-row" aria-hidden="true"><span class="sw on"></span>Required for everyone</div>
+    </li>
+    <li class="cut">
+      <span class="n">3</span>
+      <h3>Agents sign in once</h3>
+      <p>Each person adds Rucksack to their agent by its address and signs in. Their skills load at the start of every session.</p>
+      <pre class="graphite mini">claude mcp add --transport http \
+  rucksack https://rucksackhq.com/mcp</pre>
+    </li>
+  </ol>
+</section>
+
+<section class="control container" id="control">
+  <div class="sec-head">
+    <h2>Access stays with the company</h2>
+    <p class="lead">Admins decide what each person’s agent can use, and can take it back.</p>
+  </div>
+  <dl class="ledger-list">
+    <div><dt>Roles</dt><dd>Owner, admin, editor and member. Admins decide who gets each skill; editors change what skills say.</dd></div>
+    <div><dt>Required skills</dt><dd>Mark a skill required and every member’s agent has it, and every update, in its next session.</dd></div>
+    <div><dt>Reviewed changes</dt><dd>Members suggest changes and an editor approves them. Roll back to any earlier version.</dd></div>
+    <div><dt>One sign-in per app</dt><dd>Agents connect with a standard sign-in, not a shared key. See every connected app and revoke it.</dd></div>
+    <div><dt>Leaving ends access</dt><dd>Skills are served when a session starts, so someone who leaves stops getting them the next time they open their agent.</dd></div>
+    <div><dt>Agent permissions</dt><dd>Choose what each agent may say in team chat, or have it ask you first.</dd></div>
+  </dl>
+</section>
+
+<section class="next graphite">
+  <div class="container next-inner">
+    <div>
+      <h2>Next: shared tool access</h2>
+      <p class="lead">Register a tool or API key once. Rucksack gives each agent only the tools its person’s role allows, and no one keeps the key on a laptop.</p>
+    </div>
+    <div class="next-cta">
+      <p>In development for Enterprise customers.</p>
+      <a class="key" href="mailto:lance@servantventures.com?subject=Rucksack%20tool%20access">Ask about early access</a>
+    </div>
+  </div>
+</section>
+
+<section class="pricing container" id="pricing">
+  <div class="sec-head">
+    <h2>Pricing</h2>
+    <p class="lead">Free for people and small groups. Pay per person when your team grows.</p>
+  </div>
+  <div data-plans></div>
+</section>
+
+<footer class="foot container">
+  <span class="brand-sm">Rucksack</span>
+  <a href="/pricing">Pricing</a>
+  <a href="/signin">Sign in</a>
+  <a href="mailto:lance@servantventures.com">lance@servantventures.com</a>
+</footer>
+</template>
 </body>
 </html>

@@ -53,7 +53,7 @@ const editor = (value, label) => { const t = h('textarea', { class: 'code', 'ari
 
 function nav() {
   const links = me ? [['/', 'My skills'], ['/browse', 'Browse'], ['/chat', me.chat_unread ? `Chat (${me.chat_unread})` : 'Chat'], ['/connect', 'Connect'], ['/friends', 'Friends'], ['/orgs', 'Organizations'], ['/devices', 'Keys']]
-    : [['/pricing', 'Pricing'], ['/signin', 'Sign in'], ['/signin?mode=signup', 'Get started']];
+    : [['/#how', 'How it works'], ['/pricing', 'Pricing'], ['/signin', 'Sign in'], ['/signin?mode=signup', 'Start free']];
   const path = location.pathname;
   document.getElementById('nav').replaceChildren(
     ...links.map(([href, label]) => h('a', { href, class: (href === '/' ? path === '/' : path.startsWith(href)) ? 'on' : null }, label)),
@@ -324,37 +324,29 @@ function connectLive() {
 // Signed-out pages: what it is and what it costs.
 const plansP = fetch('/api/plans').then((r) => r.json()).catch(() => ({ team: '$8 per person a month', free_seats: 3 }));
 function planCards(plans) {
-  const card = (name, price, items, cta) => h('div', { class: 'card plan' }, h('h3', {}, name), h('p', { class: 'price' }, price),
-    h('ul', {}, items.map((t) => h('li', {}, t))), cta);
+  const card = (name, price, unit, items, cta, hot) => h('div', { class: `plan cut${hot ? ' hot' : ''}` }, h('h3', {}, name),
+    h('p', { class: 'price' }, price, unit && h('span', {}, unit)), h('ul', {}, items.map((t) => h('li', {}, t))), cta);
+  const [amount, ...per] = String(plans.team).split(' ');
   return h('div', { class: 'plans' },
-    card('Free', '$0', ['Private skills, shared with friends or published', 'Sign in from Claude, Claude Code, Cursor, ChatGPT and more', `Organizations of up to ${plans.free_seats} people`],
-      h('a', { class: 'btn', href: '/signin?mode=signup' }, 'Start free')),
-    card('Team', plans.team, ['Everything in Free', 'Any number of people', 'Required skills pushed to every member', 'Roles: owner, admin, editor, member', 'Suggested changes with review'],
-      h('a', { class: 'btn primary', href: '/signin?mode=signup&next=/orgs' }, 'Start a team')),
-    card('Enterprise', 'Talk to us', ['Everything in Team', 'Single sign-on', 'Central control over which agents reach which tools', 'Your own server, if you need it'],
-      h('a', { class: 'btn', href: 'mailto:lance@servantventures.com?subject=Rucksack%20Enterprise' }, 'Email us')));
+    card('Free', '$0', null, ['Private skills, shared with friends or published', 'Sign in from Claude, Claude Code, Cursor, ChatGPT and more', `Organizations of up to ${plans.free_seats} people`],
+      h('a', { class: 'key', href: '/signin?mode=signup' }, 'Start free')),
+    card('Team', amount, per.join(' '), ['Everything in Free', 'Any number of people', 'Required skills pushed to every member', 'Roles: owner, admin, editor, member', 'Suggested changes with review'],
+      h('a', { class: 'key key--primary', href: '/signin?mode=signup&next=/orgs' }, 'Start a team'), true),
+    card('Enterprise', 'Talk to us', null, ['Everything in Team', 'Single sign-on', 'Central control over which agents reach which tools', 'Your own server, if you need it'],
+      h('a', { class: 'key', href: 'mailto:lance@servantventures.com?subject=Rucksack%20Enterprise' }, 'Email us')));
 }
 async function landing() {
   const plans = await plansP;
-  const feat = (t, d) => h('div', { class: 'feat' }, h('h3', {}, t), h('p', {}, d));
-  fill(
-    h('section', { class: 'hero' },
-      h('h1', {}, 'Your team\'s agent skills, in every agent, with the right people'),
-      h('p', { class: 'lead' }, 'Write a skill once. Rucksack puts it in Claude Code, Claude, Cursor, Codex and Pi on every machine your team uses, and you decide who gets which skill.'),
-      h('div', { class: 'inline' }, h('a', { class: 'btn primary', href: '/signin?mode=signup' }, 'Get started free'), h('a', { class: 'btn', href: '/pricing' }, 'See pricing'))),
-    h('div', { class: 'feats' },
-      feat('Sign in, no setup', 'Add Rucksack to Claude or Claude Code as a connector and sign in. Skills show up in the next chat. Nothing to install.'),
-      feat('Share at the right level', 'Each skill is private, for friends, for your organization or for everyone. Change it any time.'),
-      feat('Required skills', 'Admins mark skills as required, and every member\'s agents get them and every update within seconds.'),
-      feat('Review before it ships', 'Editors publish. Everyone else suggests changes, and an editor approves them. Every version is kept and can be rolled back.')),
-    h('h2', {}, 'How it works'),
-    h('ol', { class: 'steps' }, h('li', {}, 'Create an account and an organization for your team.'), h('li', {}, 'Send your team the invite link.'),
-      h('li', {}, 'Everyone adds the Rucksack connector to their agent and signs in.'), h('li', {}, 'Publish a skill. It reaches everyone who should have it.')),
-    h('h2', {}, 'Pricing'), planCards(plans));
+  const page = document.getElementById('landing-page').content.cloneNode(true);
+  page.querySelector('[data-plan-note]').textContent = `Free for up to ${plans.free_seats} people. Team is ${plans.team}.`;
+  page.querySelector('[data-plans]').replaceWith(planCards(plans));
+  fill(page);
+  if (location.hash) document.getElementById(location.hash.slice(1))?.scrollIntoView();
 }
 async function pricing() {
-  fill(h('h1', {}, 'Pricing'), h('p', { class: 'lead' }, 'Free for people and small groups. Pay per person when your team grows.'), planCards(await plansP),
-    h('p', { class: 'muted' }, 'Team is billed monthly by card through Stripe. When someone joins or leaves, the next bill adjusts. Cancel any time from the billing page.'));
+  fill(h('section', { class: 'pricing container page-top' }, h('div', { class: 'sec-head' }, h('h1', {}, 'Pricing'),
+    h('p', { class: 'lead' }, 'Free for people and small groups. Pay per person when your team grows.')), planCards(await plansP),
+    h('p', { class: 'fine' }, 'Team is billed monthly by card through Stripe. When someone joins or leaves, the next bill adjusts. Cancel any time from the billing page.')));
 }
 
 const pages = {
@@ -674,6 +666,7 @@ async function render() {
     if (!me) me = await api('GET', '/api/me').catch(() => null);
     nav();
     $main.classList.toggle('wide', p.startsWith('/chat'));
+    document.body.classList.toggle('site', (!me && p === '/') || p === '/pricing');
     document.documentElement.style.setProperty('--toph', `${document.querySelector('.top').offsetHeight}px`);
     if (p !== '/chat' && !p.startsWith('/chat/')) chatState = null;
     if (p === '/c') { connectLive(); return await invitePage(); }
