@@ -500,28 +500,57 @@ const pages = {
   async signin() {
     const next = new URLSearchParams(location.search).get('next') || '/';
     let mode = new URLSearchParams(location.search).get('mode') === 'signup' ? 'signup' : 'signin';
-    const err = h('div', { class: 'err', role: 'alert' }, new URLSearchParams(location.search).get('error') || '');
     const plans = await api('GET', '/api/plans').catch(() => ({}));
-    const googleBtn = plans.google && h('a', { class: 'btn primary google-btn', href: `/api/auth/google?next=${encodeURIComponent(next)}` }, 'Continue with Google');
-    const draw = () => {
+    const svg = (html) => { const t = document.createElement('template'); t.innerHTML = html.trim(); return t.content.firstChild; };
+    // Google's own four-color G, as their sign-in branding rules ask.
+    const gMark = () => svg('<svg class="g-mark" viewBox="0 0 18 18" aria-hidden="true"><path fill="#4285F4" d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 0 1-1.8 2.72v2.26h2.92c1.7-1.57 2.68-3.88 2.68-6.62z"/><path fill="#34A853" d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.92-2.26c-.8.54-1.84.86-3.04.86-2.34 0-4.32-1.58-5.03-3.7H.96v2.33A9 9 0 0 0 9 18z"/><path fill="#FBBC05" d="M3.97 10.72a5.4 5.4 0 0 1 0-3.44V4.95H.96a9 9 0 0 0 0 8.1l3.01-2.33z"/><path fill="#EA4335" d="M9 3.58c1.32 0 2.5.45 3.44 1.35l2.58-2.58A9 9 0 0 0 .96 4.95l3.01 2.33C4.68 5.16 6.66 3.58 9 3.58z"/></svg>');
+    // The other half of the screen: what signing in gets you, shown rather than told.
+    const side = h('aside', { class: 'auth-side graphite', 'aria-hidden': 'true' },
+      h('p', { class: 'auth-quote' }, 'Write a skill once. Every agent on your team has it by morning.'),
+      h('div', { class: 'auth-term' },
+        h('div', { class: 'session-head' }, h('span', {}, 'Terminal'), h('span', { class: 'ok' }, 'Synced')),
+        h('pre', {}, h('span', { class: 'you' }, '$ rucksack sync'), '\n',
+          h('span', { class: 'tick' }, '✓'), ' estimate-writer   ', h('span', { class: 'token' }, 'v12'), '  Harbor Roofing\n',
+          h('span', { class: 'tick' }, '✓'), ' permit-lookup     ', h('span', { class: 'token' }, 'v4'), '   Harbor Roofing\n',
+          h('span', { class: 'tick' }, '✓'), ' my-shortcuts      ', h('span', { class: 'token' }, 'v2'), '   only you\n\n',
+          h('span', { class: 'you' }, 'Ready in Claude Code, Codex and Cursor.'))),
+      h('ul', { class: 'auth-agents' }, ['Claude Code', 'Codex', 'Cursor', 'ChatGPT', 'Pi'].map((n) => h('li', {}, n))));
+    const draw = (focus) => {
       const up = mode === 'signup';
-      const form = h('form', { class: 'stack', onsubmit: act(async (e) => {
+      const err = h('p', { class: 'auth-err', role: 'alert' }, new URLSearchParams(location.search).get('error') || '');
+      const field = (id, label, attrs, extra) => h('div', { class: 'field' }, h('label', { for: id }, label), h('div', { class: 'field-box' }, h('input', { id, ...attrs }), extra));
+      const pw = h('input');
+      const eye = h('button', { type: 'button', class: 'eye', 'aria-label': 'Show password', onclick: () => {
+        const show = pw.type === 'password'; pw.type = show ? 'text' : 'password'; eye.textContent = show ? 'Hide' : 'Show'; eye.setAttribute('aria-label', show ? 'Hide password' : 'Show password');
+      } }, 'Show');
+      const pwField = field('f-pw', 'Password', { name: 'password', type: 'password', required: true, minlength: 8, autocomplete: up ? 'new-password' : 'current-password', placeholder: up ? 'At least 8 characters' : '' }, eye);
+      pwField.querySelector('input').replaceWith(Object.assign(pw, { id: 'f-pw', name: 'password', type: 'password', required: true, minLength: 8, autocomplete: up ? 'new-password' : 'current-password', placeholder: up ? 'At least 8 characters' : '' }));
+      const submit = h('button', { class: 'key key--primary' }, up ? 'Create account' : 'Sign in');
+      const form = h('form', { class: 'auth-form', onsubmit: act(async (e) => {
         const f = Object.fromEntries(new FormData(e.target));
-        try { await api('POST', up ? '/api/signup' : '/api/login', f); } catch (x) { err.textContent = x.message; return; }
+        submit.disabled = true;
+        try { await api('POST', up ? '/api/signup' : '/api/login', f); } catch (x) { err.textContent = x.message; submit.disabled = false; return; }
         me = await api('GET', '/api/me'); go(next);
       }) },
-        up && [h('label', { for: 'f-name' }, 'Name'), h('input', { id: 'f-name', name: 'name', autocomplete: 'name' }),
-          h('label', { for: 'f-handle' }, 'Handle (how friends find you)'), h('input', { id: 'f-handle', name: 'handle', required: true, pattern: '[a-z0-9][a-z0-9\\-]*', autocapitalize: 'none' })],
-        h('label', { for: 'f-email' }, 'Email'), h('input', { id: 'f-email', name: 'email', type: 'email', required: true, autocomplete: 'email' }),
-        h('label', { for: 'f-pw' }, 'Password'), h('input', { id: 'f-pw', name: 'password', type: 'password', required: true, minlength: 8, autocomplete: up ? 'new-password' : 'current-password' }),
-        h('button', { class: 'primary' }, up ? 'Create account' : 'Sign in'), err);
-      fill(h('div', { class: 'auth' },
-        h('h1', {}, up ? 'Create your Rucksack account' : 'Sign in to Rucksack'),
-        h('p', { class: 'lead' }, 'Share agent skills with friends and your organization. They sync to Claude Code, Pi, Codex and other agents on every machine you use.'),
-        googleBtn && [googleBtn, h('p', { class: 'muted or-line' }, up ? 'Or make an account with a password' : 'Or use your password')],
-        form,
-        h('p', { class: 'switch' }, h('a', { href: '#', onclick: (e) => { e.preventDefault(); mode = up ? 'signin' : 'signup'; draw(); } }, up ? 'I already have an account' : 'Create an account')),
-      ));
+        up && h('div', { class: 'pair' },
+          field('f-name', 'Name', { name: 'name', autocomplete: 'name' }),
+          field('f-handle', 'Handle', { name: 'handle', required: true, pattern: '[a-z0-9][a-z0-9\\-]*', autocapitalize: 'none', spellcheck: 'false', placeholder: 'lowercase, no spaces' })),
+        field('f-email', 'Email', { name: 'email', type: 'email', required: true, autocomplete: 'email' }),
+        pwField, submit, err);
+      const tab = (m, label) => h('button', { type: 'button', role: 'tab', 'aria-selected': String(mode === m), class: mode === m ? 'on' : '',
+        onclick: () => { if (mode === m) return; mode = m; history.replaceState(null, '', `/signin${m === 'signup' ? '?mode=signup' : ''}${next !== '/' ? `${m === 'signup' ? '&' : '?'}next=${encodeURIComponent(next)}` : ''}`); draw(true); } }, label);
+      fill(h('div', { class: `auth-split${focus ? ' swapped' : ''}` },
+        h('section', { class: 'auth' },
+          h('div', { class: 'auth-tabs', role: 'tablist' }, tab('signin', 'Sign in'), tab('signup', 'Create account')),
+          h('h1', {}, up ? 'Start your rucksack' : 'Welcome back'),
+          h('p', { class: 'auth-sub' }, up ? `Free for up to ${plans.free_seats || 3} people. No card needed.` : 'Pick up your skills where you left them.'),
+          plans.google && [
+            h('a', { class: 'key google-key', href: `/api/auth/google?next=${encodeURIComponent(next)}` }, gMark(), 'Continue with Google'),
+            h('div', { class: 'auth-or' }, h('span', {}, 'or with email'))],
+          form,
+          up && h('p', { class: 'auth-fine' }, 'By creating an account you agree to the ', h('a', { href: '/terms' }, 'terms'), ' and ', h('a', { href: '/privacy' }, 'privacy policy'), '.')),
+        side));
+      if (focus) document.getElementById(up ? 'f-name' : 'f-email')?.focus({ preventScroll: true });
     };
     draw();
   },
@@ -854,7 +883,7 @@ async function render() {
   try {
     if (!me) me = await api('GET', '/api/me').catch(() => null);
     nav();
-    $main.classList.toggle('wide', p.startsWith('/chat'));
+    $main.classList.toggle('wide', p.startsWith('/chat') || p === '/signin');
     document.body.classList.toggle('site', (!me && p === '/') || p === '/pricing');
     document.documentElement.style.setProperty('--toph', `${document.querySelector('.top').offsetHeight}px`);
     if (p !== '/chat' && !p.startsWith('/chat/')) chatState = null;
