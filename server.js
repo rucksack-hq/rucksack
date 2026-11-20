@@ -169,8 +169,12 @@ export function createApp({ db, baseUrl = '', billing = null, redirectHosts = []
 
   // Live push: every connected sync client of a user gets "sync" and re-reads its manifest.
   const streams = new Map(); // user_id -> Set(res); res.human is true for website sessions, false for agents
+  // MCP streams (res.mcp) only hear that the skill list changed, as an MCP notification, so the app refetches it mid-session.
   const emit = (userIds, event, data = () => ({}), only = () => true) => {
-    for (const u of new Set(userIds)) for (const res of streams.get(u) || []) if (only(res, u)) res.write(`event: ${event}\ndata: ${JSON.stringify(data(u, res))}\n\n`);
+    for (const u of new Set(userIds)) for (const res of streams.get(u) || []) {
+      if (res.mcp) { if (event === 'sync') res.write(`event: message\ndata: ${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/prompts/list_changed' })}\n\n`); }
+      else if (only(res, u)) res.write(`event: ${event}\ndata: ${JSON.stringify(data(u, res))}\n\n`);
+    }
   };
   const notify = (userIds) => emit(userIds, 'sync');
   // Everyone who might see or have this skill: owner, owner's friends, org members, installers. Public skills reach installers only.
@@ -934,16 +938,19 @@ export function createApp({ db, baseUrl = '', billing = null, redirectHosts = []
     lines.push(`done`, `echo "skillnet: ${manifest(me.id).length} skills written to:$dirs"`, '');
     res.writeHead(200, { 'Content-Type': 'text/x-shellscript; charset=utf-8' }).end(lines.join('\n'));
   });
-  r('GET', '/api/events', false, ({ me, req, res }) => {
+  const listen = ({ me, req, res }, mcp) => {
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
-    res.write(`event: hello\ndata: {}\n\n`);
-    res.human = me.tkind === 'web';
+    if (mcp) { res.mcp = true; res.flushHeaders(); } else res.write(`event: hello\ndata: {}\n\n`);
+    res.human = !mcp && me.tkind === 'web';
     if (!streams.has(me.id)) streams.set(me.id, new Set());
     streams.get(me.id).add(res);
     const ping = setInterval(() => res.write(': ping\n\n'), 25e3);
     req.on('close', () => { clearInterval(ping); streams.get(me.id)?.delete(res); });
     return undefined; // stays open
-  });
+  };
+  r('GET', '/api/events', false, (x) => listen(x));
+  // MCP's server-to-app stream (GET on the MCP address).
+  r('GET', '/api/mcp', false, (x) => listen(x, true));
 
   // MCP over streamable HTTP (JSON responses), for agents that take tools instead of skill folders.
   // Each tool is a call to the API above, as the key's owner.
@@ -1076,7 +1083,7 @@ export function createApp({ db, baseUrl = '', billing = null, redirectHosts = []
   r('POST', '/api/mcp', false, async ({ me, body, res }) => {
     const reply = (result) => ({ jsonrpc: '2.0', id: body.id, result });
     if (body.id === undefined) { res.writeHead(202).end(); return undefined; } // notifications
-    if (body.method === 'initialize') return reply({ protocolVersion: body.params?.protocolVersion || '2025-06-18', capabilities: { tools: {}, prompts: {} },
+    if (body.method === 'initialize') return reply({ protocolVersion: body.params?.protocolVersion || '2025-06-18', capabilities: { tools: {}, prompts: { listChanged: true } },
       serverInfo: { name: 'rucksack', version: '1' }, instructions: instructions(me) });
     if (body.method === 'ping') return reply({});
     if (body.method === 'prompts/list') return reply({ prompts: promptList(me).map(({ id, ...p }) => ({ ...p,
@@ -1219,7 +1226,8 @@ echo "Done. Add ~/.local/bin to your PATH if 'skillnet' is not found."
       if (req.method === 'OPTIONS') return res.writeHead(204, { 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
         'Access-Control-Allow-Headers': 'Authorization, Content-Type, Mcp-Protocol-Version, Mcp-Session-Id', 'Access-Control-Max-Age': '86400' }).end();
       if (!isMcp) { try { return await oauth(req, res, url); } catch (e) { return json(res, e.status || 500, { error: 'invalid_request', error_description: e.status ? e.message : 'server error' }); } }
-      if (req.method !== 'POST') return res.writeHead(405, { Allow: 'POST' }).end();
+      if (req.method === 'GET' && !(req.headers.accept || '').includes('text/event-stream')) return res.writeHead(405, { Allow: 'GET, POST' }).end();
+      if (!['GET', 'POST'].includes(req.method)) return res.writeHead(405, { Allow: 'GET, POST' }).end();
     }
     if (url.pathname === '/api/stripe/webhook' && req.method === 'POST') return stripeWebhook(req, res);
     if (mirror && url.pathname === '/internal/git-hook' && req.method === 'POST') return mirror.hookRoute(req, res, readBody);

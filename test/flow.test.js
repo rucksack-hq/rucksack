@@ -147,6 +147,17 @@ test('accounts, friends, organizations, sync', async (t) => {
     // MCP: same answers as the command line.
     const mcp = async (key, method, params) => (await as('anon', 'POST', '/mcp', { jsonrpc: '2.0', id: 1, method, params }, bear(key))).result;
     assert.equal((await mcp(read, 'initialize', {})).serverInfo.name, 'rucksack');
+    assert.equal((await mcp(read, 'initialize', {})).capabilities.prompts.listChanged, true);
+    // The app keeps GET /mcp open; a new skill tells it to refetch the list mid-session.
+    const ac = new AbortController();
+    const stream = await fetch(base + '/mcp', { headers: { Accept: 'text/event-stream', ...bear(read) }, signal: ac.signal });
+    assert.equal(stream.status, 200);
+    const reader = stream.body.getReader();
+    const mid = (await as('bob', 'POST', '/api/skills/push', { files: { 'SKILL.md': b64('---\nname: midsession\ndescription: d\n---\nhi') } })).skill;
+    const { value } = await reader.read();
+    assert.match(new TextDecoder().decode(value), /notifications\/prompts\/list_changed/);
+    ac.abort();
+    await as('bob', 'DELETE', `/api/skills/${mid.id}`);
     assert.ok((await mcp(read, 'tools/list')).tools.some((x) => x.name === 'suggest_change'));
     const text = async (key, name, args) => (await mcp(key, 'tools/call', { name, arguments: args })).content[0].text;
     assert.match(await text(read, 'search_skills', { query: 'hand' }), /acme\/handbook/);
