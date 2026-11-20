@@ -53,6 +53,21 @@ const unb64 = (data) => new TextDecoder().decode(Uint8Array.from(atob(data), (c)
 const copyBtn = (text, label = 'Copy') => h('button', { type: 'button', onclick: act(async () => { await navigator.clipboard.writeText(typeof text === 'function' ? text() : text); toast('Copied'); }) }, label);
 const editor = (value, label) => { const t = h('textarea', { class: 'code', 'aria-label': label, spellcheck: 'false' }); t.value = value; return t; };
 
+// Light / dark: follows the device until someone taps the switch, then remembers the pick.
+const themeBtn = document.getElementById('theme');
+const darkNow = () => (document.documentElement.dataset.theme || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+const SUN = '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="10" cy="10" r="3.5"/><path d="M10 1.5v2M10 16.5v2M1.5 10h2M16.5 10h2M4 4l1.4 1.4M14.6 14.6 16 16M4 16l1.4-1.4M14.6 5.4 16 4"/></svg>';
+const MOON = '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="M16.5 12.5A7 7 0 0 1 7.5 3.5a7 7 0 1 0 9 9z"/></svg>';
+const drawTheme = () => { const d = darkNow(); themeBtn.innerHTML = d ? SUN : MOON; themeBtn.setAttribute('aria-label', d ? 'Switch to light theme' : 'Switch to dark theme'); themeBtn.title = themeBtn.getAttribute('aria-label'); };
+themeBtn?.addEventListener('click', () => {
+  const t = darkNow() ? 'light' : 'dark';
+  document.documentElement.dataset.theme = t;
+  try { localStorage.setItem('rucksack.theme', t); } catch {}
+  drawTheme();
+});
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', drawTheme);
+if (themeBtn) drawTheme();
+
 function nav() {
   const links = me ? [['/', 'My skills'], ['/browse', 'Browse'], ['/chat', me.chat_unread ? `Chat (${me.chat_unread})` : 'Chat'], ['/connect', 'Connect'], ['/friends', 'Friends'], ['/orgs', 'Organizations'], ['/devices', 'Keys']]
     : [['/#how', 'How it works'], ['/pricing', 'Pricing'], ['/signin', 'Sign in'], ['/signin?mode=signup', 'Start free']];

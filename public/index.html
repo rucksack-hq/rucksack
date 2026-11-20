@@ -8,6 +8,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Familjen+Grotesk:wght@500;600&family=IBM+Plex+Sans:wght@400;500&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script>try { const t = localStorage.getItem('rucksack.theme'); if (t) document.documentElement.dataset.theme = t; } catch {}</script>
 <link rel="stylesheet" href="/tokens.css">
 <link rel="stylesheet" href="/style.css">
 <link rel="stylesheet" href="/site.css">
@@ -17,6 +18,7 @@
 <header class="top">
   <a class="brand" href="/"><svg class="mark" viewBox="0 0 20 20" aria-hidden="true"><path d="M5 7.5a5 5 0 0 1 10 0V17H5z" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M5 11h10M8 11v2.5h4V11" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>Rucksack</a>
   <nav id="nav"></nav>
+  <button type="button" id="theme" class="theme-btn"></button>
 </header>
 <main id="main"><noscript><p>Rucksack needs JavaScript turned on.</p></noscript></main>
 <div id="toast" role="status" aria-live="polite"></div>
