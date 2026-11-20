@@ -70,7 +70,9 @@ export function openDb(file) {
   // Columns added after the first release.
   for (const sql of [`ALTER TABLE tokens ADD COLUMN scope TEXT NOT NULL DEFAULT 'write'`, `ALTER TABLE skills ADD COLUMN body TEXT NOT NULL DEFAULT ''`,
     // Connector sign-ins (OAuth): a 'connector' row is the long-lived grant holding the refresh token; its short 'oauth' access tokens point at it.
-    `ALTER TABLE tokens ADD COLUMN expires INTEGER`, `ALTER TABLE tokens ADD COLUMN grant_id TEXT`, `ALTER TABLE tokens ADD COLUMN client TEXT`])
+    `ALTER TABLE tokens ADD COLUMN expires INTEGER`, `ALTER TABLE tokens ADD COLUMN grant_id TEXT`, `ALTER TABLE tokens ADD COLUMN client TEXT`,
+    // Billing: 'free' or 'team'; the Stripe customer and subscription of a paid organization.
+    `ALTER TABLE orgs ADD COLUMN plan TEXT NOT NULL DEFAULT 'free'`, `ALTER TABLE orgs ADD COLUMN stripe_customer TEXT`, `ALTER TABLE orgs ADD COLUMN stripe_sub TEXT`])
     try { db.exec(sql); } catch (e) { if (!/duplicate column/.test(e.message)) throw e; }
   return db;
 }
@@ -112,7 +114,36 @@ export function frontmatter(md) {
   return out;
 }
 
-export function createApp({ db, baseUrl = '' }) {
+export const FREE_SEATS = 3; // people an organization may have before it needs the Team plan
+
+// Stripe over plain fetch. Nested params use Stripe's bracket form: {line_items: [{price: 'p'}]} -> line_items[0][price]=p.
+function stripeForm(obj, pre = '', out = new URLSearchParams()) {
+  for (const [k, v] of Object.entries(obj)) {
+    const key = pre ? `${pre}[${k}]` : k;
+    if (v && typeof v === 'object') stripeForm(v, key, out); else if (v !== undefined) out.append(key, String(v));
+  }
+  return out;
+}
+export function stripeClient(key, api = 'https://api.stripe.com/v1') {
+  return async (method, p, params) => {
+    const res = await fetch(`${api}${p}`, { method, headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: params ? stripeForm(params) : undefined });
+    const out = await res.json();
+    if (!res.ok) throw new HttpError(502, `billing: ${out.error?.message || res.status}`);
+    return out;
+  };
+}
+// Stripe-Signature: t=<time>,v1=<hmac of "t.body">. Rejects anything older than 5 minutes.
+export function stripeVerify(raw, header, secret, at = Date.now()) {
+  const parts = Object.fromEntries(String(header || '').split(',').map((x) => x.split('=')));
+  const sigs = String(header || '').split(',').filter((x) => x.startsWith('v1=')).map((x) => x.slice(3));
+  if (!parts.t || !sigs.length || Math.abs(at / 1000 - Number(parts.t)) > 300) return false;
+  const want = crypto.createHmac('sha256', secret).update(`${parts.t}.${raw}`).digest('hex');
+  return sigs.some((g) => g.length === want.length && crypto.timingSafeEqual(Buffer.from(g), Buffer.from(want)));
+}
+
+export function createApp({ db, baseUrl = '', billing = null }) {
+  // billing: { stripe: (method, path, params) => Promise, price, webhookSecret, priceLabel } or null when Stripe is not set up.
   const all = (sql, p = {}) => db.prepare(sql).all(p);
   const one = (sql, p = {}) => db.prepare(sql).get(p);
   const run = (sql, p = {}) => db.prepare(sql).run(p);
@@ -343,7 +374,7 @@ export function createApp({ db, baseUrl = '' }) {
     if (!NAME_RE.test(slug)) fail(400, 'organization id must be lowercase letters, digits and dashes');
     if (one('SELECT 1 x FROM orgs WHERE slug=:s', { s: slug }) || one('SELECT 1 x FROM users WHERE handle=:s', { s: slug })) fail(409, 'that id is taken');
     const id = rid(9);
-    run('INSERT INTO orgs VALUES(:id,:s,:n,:i,:c)', { id, s: slug, n: String(body.name || slug).slice(0, 80), i: rid(12), c: now() });
+    run('INSERT INTO orgs(id,slug,name,invite,created) VALUES(:id,:s,:n,:i,:c)', { id, s: slug, n: String(body.name || slug).slice(0, 80), i: rid(12), c: now() });
     run(`INSERT INTO members VALUES(:o,:u,'owner')`, { o: id, u: me.id });
     return { org: { slug, name: body.name || slug, role: 'owner' } };
   });
@@ -351,7 +382,8 @@ export function createApp({ db, baseUrl = '' }) {
     const o = getOrg(m[1]);
     const myRole = role(o.id, me.id) || fail(404, 'no such organization');
     return {
-      org: { slug: o.slug, name: o.name, role: myRole, invite: ['owner', 'admin'].includes(myRole) ? `${baseUrl}/join?code=${o.invite}` : null },
+      org: { slug: o.slug, name: o.name, role: myRole, invite: ['owner', 'admin'].includes(myRole) ? `${baseUrl}/join?code=${o.invite}` : null,
+        plan: o.plan, free_seats: FREE_SEATS, billing: !!billing, price: billing?.priceLabel || null, can_bill: !!billing && ['owner', 'admin'].includes(myRole) },
       members: all('SELECT u.id, u.handle, u.name, m.role FROM members m JOIN users u ON u.id=m.user_id WHERE m.org_id=:o ORDER BY u.handle', { o: o.id }),
       skills: all(`SELECT ${SKILL_COLS} FROM ${SKILL_FROM} WHERE s.owner_org=:o ORDER BY s.name`, { o: o.id }).map((s) => pubSkill(s, me.id)),
     };
@@ -365,7 +397,10 @@ export function createApp({ db, baseUrl = '' }) {
   });
   r('POST', '/api/join', false, ({ me, body }) => {
     const o = one('SELECT * FROM orgs WHERE invite=:i', { i: String(body.code || '') }) || fail(404, 'that invite link is wrong or was reset');
+    if (!role(o.id, me.id) && o.plan !== 'team' && seats(o.id) >= FREE_SEATS)
+      fail(402, `${o.name} is on the free plan, which allows ${FREE_SEATS} people. Ask an admin to upgrade it to Team.`);
     run(`INSERT OR IGNORE INTO members VALUES(:o,:u,'member')`, { o: o.id, u: me.id });
+    syncSeats(o.id);
     notify([me.id]);
     return { org: { slug: o.slug, name: o.name } };
   });
@@ -384,9 +419,59 @@ export function createApp({ db, baseUrl = '' }) {
     if (!self && !isAdmin(o.id, me.id)) fail(403, 'only admins can remove people');
     if (role(o.id, m[2]) === 'owner' && (lastOwner(o.id) || role(o.id, me.id) !== 'owner')) fail(400, 'cannot remove that owner');
     run('DELETE FROM members WHERE org_id=:o AND user_id=:u', { o: o.id, u: m[2] });
+    syncSeats(o.id);
     notify([m[2]]);
     return { ok: true };
   });
+
+  r('GET', '/api/plans', PUBLIC_ROUTE, () => ({ free_seats: FREE_SEATS, team: billing?.priceLabel || '$8 per person a month', billing: !!billing }));
+  // Billing. Team is priced per person; Stripe holds the card and invoices, the webhook below sets the plan.
+  const seats = (orgId) => one('SELECT count(*) n FROM members WHERE org_id=:o', { o: orgId }).n;
+  const billingOrg = (slug, me) => {
+    if (!billing) fail(503, 'billing is not set up on this server');
+    const o = getOrg(slug);
+    if (!isAdmin(o.id, me.id)) fail(403, 'only owners and admins manage billing');
+    return o;
+  };
+  // Keep the subscription quantity equal to the number of people. Best effort: a failure is logged and fixed by the next change.
+  function syncSeats(orgId) {
+    const o = one('SELECT plan, stripe_sub FROM orgs WHERE id=:o', { o: orgId });
+    if (!billing || o.plan !== 'team' || !o.stripe_sub) return;
+    const n = seats(orgId);
+    (async () => {
+      const sub = await billing.stripe('GET', `/subscriptions/${o.stripe_sub}`);
+      const item = sub.items.data[0];
+      if (item && item.quantity !== n) await billing.stripe('POST', `/subscription_items/${item.id}`, { quantity: n, proration_behavior: 'create_prorations' });
+    })().catch((e) => console.error('seat sync', orgId, e.message));
+  }
+  r('POST', '/api/orgs/([\\w-]+)/billing/checkout', false, async ({ me, m }) => {
+    const o = billingOrg(m[1], me);
+    if (o.plan === 'team') fail(400, `${o.name} is already on Team`);
+    const session = await billing.stripe('POST', '/checkout/sessions', {
+      mode: 'subscription', client_reference_id: o.id, customer: o.stripe_customer || undefined, customer_email: o.stripe_customer ? undefined : me.email,
+      line_items: [{ price: billing.price, quantity: Math.max(seats(o.id), 1) }],
+      subscription_data: { metadata: { org: o.id } }, metadata: { org: o.id }, allow_promotion_codes: true,
+      success_url: `${baseUrl}/o/${o.slug}?billing=done`, cancel_url: `${baseUrl}/o/${o.slug}` });
+    return { url: session.url };
+  });
+  r('POST', '/api/orgs/([\\w-]+)/billing/portal', false, async ({ me, m }) => {
+    const o = billingOrg(m[1], me);
+    if (!o.stripe_customer) fail(400, `${o.name} has no billing account yet`);
+    return { url: (await billing.stripe('POST', '/billing_portal/sessions', { customer: o.stripe_customer, return_url: `${baseUrl}/o/${o.slug}` })).url };
+  });
+  // Stripe events. Signed with the webhook secret; the raw body is checked before anything is read from it.
+  async function stripeWebhook(req, res) {
+    const raw = await readBody(req);
+    if (!billing || !stripeVerify(raw, req.headers['stripe-signature'], billing.webhookSecret)) return json(res, 400, { error: 'bad signature' });
+    const ev = JSON.parse(raw), x = ev.data.object;
+    if (ev.type === 'checkout.session.completed' && x.mode === 'subscription' && x.client_reference_id)
+      run(`UPDATE orgs SET plan='team', stripe_customer=:c, stripe_sub=:s WHERE id=:o`, { c: x.customer, s: x.subscription, o: x.client_reference_id });
+    if (ev.type.startsWith('customer.subscription.') && x.metadata?.org) {
+      const active = ['active', 'trialing', 'past_due'].includes(x.status) && ev.type !== 'customer.subscription.deleted';
+      run('UPDATE orgs SET plan=:p, stripe_customer=:c, stripe_sub=:s WHERE id=:o', { p: active ? 'team' : 'free', c: x.customer, s: active ? x.id : null, o: x.metadata.org });
+    }
+    return json(res, 200, { received: true });
+  }
 
   // Skills
   r('GET', '/api/skills', false, ({ me, query }) => {
@@ -926,7 +1011,8 @@ echo "Done. Add ~/.local/bin to your PATH if 'skillnet' is not found."
   function serveStatic(url, res) {
     let file = path.normalize(path.join(PUBLIC, url.pathname));
     if (!file.startsWith(PUBLIC) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) file = path.join(PUBLIC, 'index.html');
-    res.writeHead(200, { 'Content-Type': TYPES[path.extname(file)] || 'application/octet-stream' });
+    // no-cache: the Cloudflare edge would otherwise keep serving the old app.js after a deploy.
+    res.writeHead(200, { 'Content-Type': TYPES[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
     fs.createReadStream(file).pipe(res);
   }
 
@@ -1015,6 +1101,7 @@ echo "Done. Add ~/.local/bin to your PATH if 'skillnet' is not found."
       if (!isMcp) { try { return await oauth(req, res, url); } catch (e) { return json(res, e.status || 500, { error: 'invalid_request', error_description: e.status ? e.message : 'server error' }); } }
       if (req.method !== 'POST') return res.writeHead(405, { Allow: 'POST' }).end();
     }
+    if (url.pathname === '/api/stripe/webhook' && req.method === 'POST') return stripeWebhook(req, res);
     if (url.pathname === '/install.sh') return res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' }).end(installScript());
     const cli = /^\/cli\/(skillnet\.js|pi-skillnet-reload\.ts)$/.exec(url.pathname)?.[1];
     if (cli) return res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' }).end(fs.readFileSync(path.join(HERE, 'cli', cli)));
@@ -1052,6 +1139,9 @@ echo "Done. Add ~/.local/bin to your PATH if 'skillnet' is not found."
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const port = Number(process.env.PORT || 8795);
   const db = openDb(process.env.SKILLNET_DB || path.join(HERE, 'data', 'skillnet.db'));
-  const app = createApp({ db, baseUrl: process.env.SKILLNET_URL || `http://localhost:${port}` });
+  const e = process.env;
+  const billing = e.STRIPE_KEY && e.STRIPE_PRICE && e.STRIPE_WEBHOOK_SECRET
+    ? { stripe: stripeClient(e.STRIPE_KEY), price: e.STRIPE_PRICE, webhookSecret: e.STRIPE_WEBHOOK_SECRET, priceLabel: e.STRIPE_PRICE_LABEL || null } : null;
+  const app = createApp({ db, baseUrl: e.SKILLNET_URL || `http://localhost:${port}`, billing });
   http.createServer(app.handle).listen(port, process.env.HOST || '127.0.0.1', () => console.log(`skillnet on :${port}`));
 }

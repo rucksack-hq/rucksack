@@ -217,3 +217,18 @@ button.ghost:hover, button.ghost[aria-expanded="true"] { background: var(--soft)
   .pane { padding: 16px 12px; }
 }
 @media (prefers-reduced-motion: reduce) { .msg.arrive { animation: none; } }
+/* Signed-out pages: landing and pricing. Same utility look, a little more air. */
+.hero { padding: 32px 0 8px; }
+.hero h1 { font-size: 32px; line-height: 1.2; max-width: 22ch; }
+.hero .lead { font-size: 17px; max-width: 60ch; margin: 0 0 20px; }
+.hero .inline { flex-wrap: wrap; }
+.feats { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px 24px; margin-top: 32px; }
+.feat h3, .plan h3 { font-size: 15px; font-weight: 650; margin: 0 0 4px; }
+.feat p { margin: 0; color: var(--muted); font-size: 14px; }
+.plans { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.plan { display: flex; flex-direction: column; }
+.plan .price { font-size: 20px; font-weight: 650; margin: 0 0 8px; }
+.plan ul { padding-left: 20px; margin: 0 0 16px; flex: 1; font-size: 14px; }
+.plan .btn { align-self: start; }
+.inline { display: flex; gap: 8px; align-items: center; }
+.plan-bar { margin-top: 12px; }

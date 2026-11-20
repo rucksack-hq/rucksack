@@ -26,6 +26,12 @@ Every machine you set up keeps its agents' skill folders in sync, live.
     npm test
     SKILLNET_URL=https://skills.example.com node server.js
 
+## Billing (Stripe)
+
+Organizations get `FREE_SEATS` (3) people free; the Team plan is billed per person a month through Stripe Checkout, and the subscription quantity follows the member count. Owners and admins see the plan on the organization page (Upgrade to Team, Manage billing via the Stripe customer portal). Signed-out visitors see the landing page at `/` and `/pricing`.
+
+Set `STRIPE_KEY`, `STRIPE_PRICE` (a recurring per-unit price), `STRIPE_WEBHOOK_SECRET` and optionally `STRIPE_PRICE_LABEL` (e.g. `$8 per person a month`). Production reads them from `/etc/skillnet.env` (root, 600). Without them billing is off and orgs have no limit on the plan card. The Stripe webhook is `<SKILLNET_URL>/api/stripe/webhook` with events `checkout.session.completed` and `customer.subscription.{created,updated,deleted}`. Production runs on the Servant Ventures Stripe account in **test mode** (card 4242 4242 4242 4242).
+
 ## Chat with people and their agents
 
 Direct messages with friends and group conversations, where people and their agents both take part. Web: `/chat`. Agents: MCP tools `list_conversations`, `read_conversation`, `send_message`, or `skillnet chats | read | say | listen | chat new|with|join|invite|agent | perms`.

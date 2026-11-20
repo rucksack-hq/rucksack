@@ -52,11 +52,12 @@ const copyBtn = (text, label = 'Copy') => h('button', { type: 'button', onclick:
 const editor = (value, label) => { const t = h('textarea', { class: 'code', 'aria-label': label, spellcheck: 'false' }); t.value = value; return t; };
 
 function nav() {
-  const links = me ? [['/', 'My skills'], ['/browse', 'Browse'], ['/chat', me.chat_unread ? `Chat (${me.chat_unread})` : 'Chat'], ['/connect', 'Connect'], ['/friends', 'Friends'], ['/orgs', 'Organizations'], ['/devices', 'Keys']] : [];
+  const links = me ? [['/', 'My skills'], ['/browse', 'Browse'], ['/chat', me.chat_unread ? `Chat (${me.chat_unread})` : 'Chat'], ['/connect', 'Connect'], ['/friends', 'Friends'], ['/orgs', 'Organizations'], ['/devices', 'Keys']]
+    : [['/pricing', 'Pricing'], ['/signin', 'Sign in'], ['/signin?mode=signup', 'Get started']];
   const path = location.pathname;
   document.getElementById('nav').replaceChildren(
     ...links.map(([href, label]) => h('a', { href, class: (href === '/' ? path === '/' : path.startsWith(href)) ? 'on' : null }, label)),
-    me && h('a', { href: '#', onclick: act(async () => { await api('POST', '/api/logout'); me = null; live?.close(); live = null; go('/'); }) }, `Sign out @${me.user.handle}`),
+    ...(me ? [h('a', { href: '#', onclick: act(async () => { await api('POST', '/api/logout'); me = null; live?.close(); live = null; go('/'); }) }, `Sign out @${me.user.handle}`)] : []),
   );
 }
 
@@ -320,6 +321,42 @@ function connectLive() {
   live.addEventListener('convo', (e) => onChat(e, 'convo'));
 }
 
+// Signed-out pages: what it is and what it costs.
+const plansP = fetch('/api/plans').then((r) => r.json()).catch(() => ({ team: '$8 per person a month', free_seats: 3 }));
+function planCards(plans) {
+  const card = (name, price, items, cta) => h('div', { class: 'card plan' }, h('h3', {}, name), h('p', { class: 'price' }, price),
+    h('ul', {}, items.map((t) => h('li', {}, t))), cta);
+  return h('div', { class: 'plans' },
+    card('Free', '$0', ['Private skills, shared with friends or published', 'Sign in from Claude, Claude Code, Cursor, ChatGPT and more', `Organizations of up to ${plans.free_seats} people`],
+      h('a', { class: 'btn', href: '/signin?mode=signup' }, 'Start free')),
+    card('Team', plans.team, ['Everything in Free', 'Any number of people', 'Required skills pushed to every member', 'Roles: owner, admin, editor, member', 'Suggested changes with review'],
+      h('a', { class: 'btn primary', href: '/signin?mode=signup&next=/orgs' }, 'Start a team')),
+    card('Enterprise', 'Talk to us', ['Everything in Team', 'Single sign-on', 'Central control over which agents reach which tools', 'Your own server, if you need it'],
+      h('a', { class: 'btn', href: 'mailto:lance@servantventures.com?subject=Skillnet%20Enterprise' }, 'Email us')));
+}
+async function landing() {
+  const plans = await plansP;
+  const feat = (t, d) => h('div', { class: 'feat' }, h('h3', {}, t), h('p', {}, d));
+  fill(
+    h('section', { class: 'hero' },
+      h('h1', {}, 'Your team\'s agent skills, in every agent, with the right people'),
+      h('p', { class: 'lead' }, 'Write a skill once. Skillnet puts it in Claude Code, Claude, Cursor, Codex and Pi on every machine your team uses, and you decide who gets which skill.'),
+      h('div', { class: 'inline' }, h('a', { class: 'btn primary', href: '/signin?mode=signup' }, 'Get started free'), h('a', { class: 'btn', href: '/pricing' }, 'See pricing'))),
+    h('div', { class: 'feats' },
+      feat('Sign in, no setup', 'Add Skillnet to Claude or Claude Code as a connector and sign in. Skills show up in the next chat. Nothing to install.'),
+      feat('Share at the right level', 'Each skill is private, for friends, for your organization or for everyone. Change it any time.'),
+      feat('Required skills', 'Admins mark skills as required, and every member\'s agents get them and every update within seconds.'),
+      feat('Review before it ships', 'Editors publish. Everyone else suggests changes, and an editor approves them. Every version is kept and can be rolled back.')),
+    h('h2', {}, 'How it works'),
+    h('ol', { class: 'steps' }, h('li', {}, 'Create an account and an organization for your team.'), h('li', {}, 'Send your team the invite link.'),
+      h('li', {}, 'Everyone adds the Skillnet connector to their agent and signs in.'), h('li', {}, 'Publish a skill. It reaches everyone who should have it.')),
+    h('h2', {}, 'Pricing'), planCards(plans));
+}
+async function pricing() {
+  fill(h('h1', {}, 'Pricing'), h('p', { class: 'lead' }, 'Free for people and small groups. Pay per person when your team grows.'), planCards(await plansP),
+    h('p', { class: 'muted' }, 'Team is billed monthly by card through Stripe. When someone joins or leaves, the next bill adjusts. Cancel any time from the billing page.'));
+}
+
 const pages = {
   async signin() {
     const next = new URLSearchParams(location.search).get('next') || '/';
@@ -497,6 +534,14 @@ const pages = {
   async org(slug) {
     const d = await api('GET', `/api/orgs/${slug}`);
     const o = d.org, admin = ['owner', 'admin'].includes(o.role), owner = o.role === 'owner';
+    if (new URLSearchParams(location.search).get('billing') === 'done') { history.replaceState(null, '', location.pathname); toast('Thanks. Your team plan starts as soon as Stripe confirms.'); }
+    const openBilling = (kind) => act(async () => { location.href = (await api('POST', `/api/orgs/${slug}/billing/${kind}`)).url; });
+    const team = o.plan === 'team';
+    const plan = o.billing && h('div', { class: 'card row plan-bar' },
+      h('div', { class: 'grow' }, h('strong', {}, team ? 'Team plan' : 'Free plan'),
+        h('div', { class: 'muted' }, team ? `${d.members.length} ${d.members.length === 1 ? 'person' : 'people'}, ${o.price || 'billed per person'}. The bill follows the number of people.`
+          : `${d.members.length} of ${o.free_seats} people. Upgrade to Team${o.price ? ` (${o.price})` : ''} for more.`)),
+      o.can_bill && h('button', { class: team ? null : 'primary', onclick: openBilling(team ? 'portal' : 'checkout') }, team ? 'Manage billing' : 'Upgrade to Team'));
     fill(
       h('h1', {}, o.name),
       h('p', { class: 'lead' }, `You are ${o.role === 'owner' ? 'the owner' : `${o.role === 'admin' || o.role === 'editor' ? 'an' : 'a'} ${o.role}`}: ${ROLE_HELP[o.role].toLowerCase()}.`),
@@ -504,6 +549,7 @@ const pages = {
         h('div', { class: 'row' }, h('code', { class: 'grow' }, o.invite),
           h('button', { onclick: act(async () => { await navigator.clipboard.writeText(o.invite); toast('Copied'); }) }, 'Copy'),
           h('button', { onclick: act(async () => { await api('POST', `/api/orgs/${slug}/invite`); toast('Old link no longer works'); render(); }) }, 'New link'))),
+      plan,
       h('h2', {}, 'Skills'),
       h('div', { class: 'list' }, d.skills.length ? d.skills.map((s) => skillRow(s)) : h('p', { class: 'muted' }, 'No skills yet.')),
       h('h2', {}, 'Members'),
@@ -548,6 +594,12 @@ const pages = {
         steps('In Claude (desktop app, claude.ai or the phone app) open Settings, then Connectors, then Add custom connector.',
           ['Name it Skillnet and paste this address:', snippet(url)], `Choose Connect. ${signIn}`),
         h('p', {}, 'That covers Claude Code too, including cloud sessions. On a Team or Enterprise plan an owner can add it once for everyone in Organization settings, Connectors. If Claude Code asks, type /mcp and choose Skillnet to sign in.')]],
+      code: ['Claude Code', () => [
+        h('p', {}, 'Run this once in a terminal. It adds Skillnet for every project on this machine:'),
+        snippet(`claude mcp add --transport http --scope user skillnet ${url}`),
+        steps('Start Claude Code and type /mcp.', `Choose skillnet, then Authenticate. ${signIn}`, 'Ask Claude Code “what Skillnet skills do I have?”'),
+        h('p', {}, 'Want the skills as real files in ~/.claude/skills, so they load without asking and work offline? Run this instead; it keeps them in sync:'),
+        snippet(`curl -fsSL ${origin}/install.sh | sh`)]],
       cursor: ['Cursor', () => [
         h('p', {}, h('a', { class: 'btn primary', href: `cursor://anysphere.cursor-deeplink/mcp/install?name=skillnet&config=${btoa(JSON.stringify({ url }))}` }, 'Add to Cursor')),
         h('p', {}, `Then choose Connect next to Skillnet in Cursor's MCP settings. ${signIn} Or add it by hand in Settings, MCP, with this address:`), snippet(url)]],
@@ -625,6 +677,8 @@ async function render() {
     document.documentElement.style.setProperty('--toph', `${document.querySelector('.top').offsetHeight}px`);
     if (p !== '/chat' && !p.startsWith('/chat/')) chatState = null;
     if (p === '/c') { connectLive(); return await invitePage(); }
+    if (!me && p === '/') return await landing();
+    if (p === '/pricing') return await pricing();
     if (!me) { if (p !== '/signin') history.replaceState(null, '', `/signin?next=${encodeURIComponent(p + location.search)}`); await pages.signin(); return; }
     if (p === '/signin') return go(new URLSearchParams(location.search).get('next') || '/');
     connectLive();
