@@ -369,6 +369,47 @@ const LEVEL_SHORT = { none: 'None', read: 'Read', ask: 'Ask', write: 'Write' };
 const AUTH_HELP = { header: 'Header / API key', oauth2_refresh_token: 'OAuth2 refresh token', oauth2_client_credentials: 'OAuth2 client credentials',
   broker: 'Token broker', google_dwd: 'Google Workspace (per-user)', query_params: 'Query parameters' };
 
+// Matrix table: rows = team members, columns = software/services, cells = level selector.
+function teamMatrix(slug, d, svc) {
+  const conns = svc.connections || [];
+  const levelFor = (c, uid) => c.people?.find((p) => p.id === uid)?.level || c.default_level;
+  const filter = h('input', { class: 'perm-filter', type: 'search', placeholder: 'Filter people or software…', 'aria-label': 'Filter people or software' });
+  const wrap = h('div', { class: 'matrix-wrap' });
+
+  const draw = () => {
+    const q = filter.value.trim().toLowerCase();
+    const people = q ? d.members.filter((m) => m.name.toLowerCase().includes(q) || m.handle.includes(q) || (m.email || '').toLowerCase().includes(q)) : d.members;
+    const cols = q ? conns.filter((c) => c.name.includes(q) || (c.description || '').toLowerCase().includes(q)) : conns;
+    const showPeople = people.length ? people : d.members;
+    const showCols = cols.length ? cols : conns;
+
+    wrap.replaceChildren(h('table', { class: 'matrix-table' },
+      h('thead', {}, h('tr', {},
+        h('th', { class: 'sticky' }, 'Person'),
+        showCols.map((c) => h('th', { title: c.description || c.base_url }, c.name)))),
+      h('tbody', {}, showPeople.map((m) => h('tr', {},
+        h('td', { class: 'sticky' },
+          h('a', { class: 'who-link', href: `/o/${slug}?member=${m.id}` }, m.name),
+          h('div', { class: 'who-meta' }, h('span', {}, m.role),
+            h('span', { class: `tag ${m.email_verified ? 'ok' : 'warn'}` }, m.email_verified ? 'Verified' : 'Unverified'))),
+        showCols.map((c) => {
+          const cur = levelFor(c, m.id);
+          const sel = h('select', { class: `lvl-pick lv-${cur}`, 'aria-label': `${m.name} access to ${c.name}`, onchange: act(async (e) => {
+            const val = e.target.value;
+            sel.className = `lvl-pick lv-${val}`;
+            await api('PUT', `/api/orgs/${slug}/connections/${c.name}/access`, { user: m.id, level: val });
+            const p = c.people?.find((x) => x.id === m.id);
+            if (p) { p.level = val; p.set = true; }
+            toast(`${m.name} · ${c.name}: ${LEVEL_SHORT[val]}`);
+          }) }, svc.levels.map((l) => h('option', { value: l, selected: cur === l }, LEVEL_SHORT[l])));
+          return h('td', {}, sel);
+        }))))));
+  };
+  filter.oninput = draw;
+  draw();
+  return [conns.length > 4 || d.members.length > 5 ? filter : null, wrap];
+}
+
 // Person-first permissions screen (mirrors Claude Gateway's clean per-user table).
 function memberAccessView(slug, d, svc, member) {
   const o = d.org, admin = ['owner', 'admin'].includes(o.role), owner = o.role === 'owner';
@@ -705,15 +746,14 @@ const pages = {
           h('button', { onclick: act(async () => { await api('POST', `/api/orgs/${slug}/invite`); toast('Old link no longer works'); render(); }) }, 'New link'))),
       plan,
       h('h2', {}, 'Team and access'),
-      h('p', { class: 'muted' }, admin ? 'Open a person to set their role, verify their email, and pick what services they can reach in one table.' : Object.entries(ROLE_HELP).map(([r, t]) => `${r[0].toUpperCase() + r.slice(1)}: ${t.toLowerCase()}.`).join(' ')),
-      h('table', { class: 'team-table' },
-        h('thead', {}, h('tr', {}, h('th', {}, 'Person'), h('th', {}, 'Role'), admin && h('th', { class: 'hide-sm' }, 'Services'), h('th', { class: 'act' }, ''))),
+      h('p', { class: 'muted' }, admin ? 'Select each person’s level on each software right in the table. Click a name for role, email verification, or to copy access from a teammate.' : Object.entries(ROLE_HELP).map(([r, t]) => `${r[0].toUpperCase() + r.slice(1)}: ${t.toLowerCase()}.`).join(' ')),
+      admin && svc.connections?.length ? teamMatrix(slug, d, svc) : h('table', { class: 'team-table' },
+        h('thead', {}, h('tr', {}, h('th', {}, 'Person'), h('th', {}, 'Role'), h('th', { class: 'act' }, ''))),
         h('tbody', {}, d.members.map((m) => h('tr', {},
           h('td', {}, h('div', { class: 'who' },
             h('strong', {}, m.name, ' ', h('span', { class: `tag ${m.email_verified ? 'ok' : 'warn'}` }, m.email_verified ? 'Verified' : 'Unverified')),
             h('span', { class: 'sub' }, `@${m.handle}${m.email ? ` — ${m.email}` : ''}`))),
           h('td', {}, h('span', { class: 'tag' }, m.role)),
-          admin && h('td', { class: 'hide-sm' }, svc.connections?.length ? `${svcCount(m.id)} of ${svc.connections.length}` : '0'),
           h('td', { class: 'act' }, admin ? h('a', { class: 'btn', href: `/o/${slug}?member=${m.id}` }, 'Access')
             : m.id === me.user.id && h('button', { class: 'danger', onclick: act(async () => {
               await api('DELETE', `/api/orgs/${slug}/members/${m.id}`); go('/orgs');
