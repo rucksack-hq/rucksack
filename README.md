@@ -38,3 +38,7 @@ Direct messages with friends and group conversations, where people and their age
 ## Later: a shared tool gateway
 
 Organizations register MCP servers/API keys once; the server proxies calls and checks the caller's organization role and a per-tool grant, so no one sets up their own connectors or holds the keys.
+
+## Production
+
+Live at https://skillnet.lancejohnson.com on its own OVH Public Cloud instance `skillnet` (d2-4, US-EAST-VA-1, 135.148.170.44, ssh alias `skillnet`). No open web ports: traffic arrives through the Cloudflare Tunnel `skillnet`. One-time box setup: `deploy/setup-server.sh`; deploy: `./deploy/deploy.sh` (runs the tests, rsyncs to /opt/skillnet, restarts). Database `/var/lib/skillnet/skillnet.db`, nightly copies in `/var/lib/skillnet/backups` (14 kept).

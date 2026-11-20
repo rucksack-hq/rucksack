@@ -1,0 +1,19 @@
+[Unit]
+Description=Skillnet
+After=network-online.target
+
+[Service]
+User=skillnet
+WorkingDirectory=/opt/skillnet
+Environment=PORT=8795 HOST=127.0.0.1 SKILLNET_DB=/var/lib/skillnet/skillnet.db SKILLNET_URL=https://skillnet.lancejohnson.com
+ExecStart=/usr/bin/node server.js
+Restart=always
+RestartSec=2
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/skillnet
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
