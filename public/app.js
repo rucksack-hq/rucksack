@@ -29,6 +29,8 @@ const go = (url) => { history.pushState(null, '', url); render(); };
 document.addEventListener('click', (e) => {
   const a = e.target.closest('a[href^="/"]');
   if (!a || e.metaKey || e.ctrlKey || a.target) return;
+  // Server routes (Google sign-in, privacy, terms, git) need a real page load, not the in-page router.
+  if (/^\/(api|git|privacy|terms|plugin\.git)(\/|\?|#|$)/.test(a.getAttribute('href'))) return;
   e.preventDefault(); go(a.getAttribute('href'));
 });
 addEventListener('popstate', render);
