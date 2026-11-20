@@ -129,13 +129,21 @@ export function gitMirror({ gitDir, baseUrl, one, all, run, getOrg, role, isEdit
     if (pushing && me.scope === 'read') return deny(403, 'this key is read-only; make a write key to push');
     ensureRepo(o);
     const a = req.socket.localAddress, host = a.includes(':') ? `[${a}]` : a;
+    httpBackend(req, res, url, gitDir, `/${o.slug}.git${m[2] || ''}`, { REMOTE_USER: me.id,
+      SKILLNET_HOOK_URL: `http://${host}:${req.socket.localPort}/internal/git-hook`, SKILLNET_HOOK_SECRET: secret, SKILLNET_ORG: o.slug });
+  }
+
+  return { serve, hookRoute, sync, ensureRepo };
+}
+
+// Runs git http-backend (smart HTTP) for one request.
+export function httpBackend(req, res, url, root, pathInfo, extra = {}) {
     const cgi = spawn('git', ['http-backend'], { env: {
-      PATH: process.env.PATH, HOME: gitDir, GIT_PROJECT_ROOT: gitDir, GIT_HTTP_EXPORT_ALL: '1', PATH_INFO: `/${o.slug}.git${m[2] || ''}`,
-      REQUEST_METHOD: req.method, QUERY_STRING: url.search.slice(1), CONTENT_TYPE: req.headers['content-type'] || '', REMOTE_USER: me.id, REMOTE_ADDR: '127.0.0.1',
+      PATH: process.env.PATH, HOME: root, GIT_PROJECT_ROOT: root, GIT_HTTP_EXPORT_ALL: '1', PATH_INFO: pathInfo,
+      REQUEST_METHOD: req.method, QUERY_STRING: url.search.slice(1), CONTENT_TYPE: req.headers['content-type'] || '', REMOTE_ADDR: '127.0.0.1',
       ...(req.headers['content-length'] ? { CONTENT_LENGTH: req.headers['content-length'] } : {}),
       ...(req.headers['content-encoding'] ? { HTTP_CONTENT_ENCODING: req.headers['content-encoding'] } : {}),
-      ...(req.headers['git-protocol'] ? { GIT_PROTOCOL: req.headers['git-protocol'] } : {}),
-      SKILLNET_HOOK_URL: `http://${host}:${req.socket.localPort}/internal/git-hook`, SKILLNET_HOOK_SECRET: secret, SKILLNET_ORG: o.slug } });
+      ...(req.headers['git-protocol'] ? { GIT_PROTOCOL: req.headers['git-protocol'] } : {}), ...extra } });
     req.pipe(cgi.stdin);
     let head = Buffer.alloc(0), sent = false;
     cgi.stdout.on('data', (c) => {
@@ -156,7 +164,4 @@ export function gitMirror({ gitDir, baseUrl, one, all, run, getOrg, role, isEdit
     cgi.stdout.on('end', () => { if (!sent) res.writeHead(500); res.end(); });
     cgi.stderr.on('data', (c) => console.error('git http-backend:', String(c).trim()));
     cgi.on('error', (e) => { console.error('git http-backend', e.message); if (!sent) res.writeHead(500).end(); });
-  }
-
-  return { serve, hookRoute, sync, ensureRepo };
 }

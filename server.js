@@ -1246,7 +1246,7 @@ echo "Done. Add ~/.local/bin to your PATH if 'skillnet' is not found."
     if (url.pathname === '/install.sh') return res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' }).end(installScript());
     const cli = /^\/cli\/(skillnet\.js|pi-skillnet-reload\.ts)$/.exec(url.pathname)?.[1];
     if (cli) return res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' }).end(fs.readFileSync(path.join(HERE, 'cli', cli)));
-    if (url.pathname.startsWith('/plugin.git/') && req.method === 'GET') return servePlugin(pluginRepo, url, res);
+    if (url.pathname.startsWith('/plugin.git/')) return servePlugin(pluginRepo, req, res, url);
     if (url.pathname === '/mcp') url.pathname = '/api/mcp';
     if (!url.pathname.startsWith('/api/')) return serveStatic(url, res);
     try {

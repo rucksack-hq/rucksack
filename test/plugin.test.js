@@ -31,7 +31,7 @@ test('plugin marketplace, hook sign-in and sync, connector without the skill lis
   await api('POST', '/api/skills/push', { files: { 'SKILL.md': Buffer.from('---\nname: notes\ndescription: d\n---\nhi').toString('base64') } });
 
   const dest = path.join(tmp, 'clone');
-  await run('git', ['clone', '-q', `${base}/plugin.git`, dest]);
+  await run('git', ['clone', '-q', '--depth', '1', `${base}/plugin.git`, dest]); // Claude Code clones shallow
   assert.equal(JSON.parse(fs.readFileSync(path.join(dest, '.claude-plugin/marketplace.json'))).plugins[0].source, './plugin');
   const mcp = JSON.parse(fs.readFileSync(path.join(dest, 'plugin/.mcp.json'))).mcpServers.rucksack;
   assert.equal(mcp.url, `${base}/mcp`);
