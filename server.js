@@ -1215,6 +1215,7 @@ echo "Done. Add ~/.local/bin to your PATH if 'skillnet' is not found."
   const assetHash = (f) => crypto.createHash('sha256').update(fs.readFileSync(path.join(PUBLIC, f))).digest('hex').slice(0, 10);
   function serveStatic(url, res) {
     let file = path.normalize(path.join(PUBLIC, url.pathname));
+    if (file.startsWith(PUBLIC) && !path.extname(file) && fs.existsSync(`${file}.html`)) file += '.html'; // /privacy, /terms
     if (!file.startsWith(PUBLIC) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) file = path.join(PUBLIC, 'index.html');
     // no-cache: the Cloudflare edge would otherwise keep serving the old app.js after a deploy.
     res.writeHead(200, { 'Content-Type': TYPES[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
