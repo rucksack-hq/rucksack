@@ -1,4 +1,4 @@
-// Skillnet web app: plain DOM, no build step.
+// Rucksack web app: plain DOM, no build step.
 const $main = document.getElementById('main');
 let me = null;
 
@@ -301,7 +301,7 @@ async function invitePage() {
   const names = g.faces.slice(0, 3).join(', ') + (g.people > 3 ? ` and ${g.people - 3} more` : '');
   fill(h('div', { class: 'invite card' }, h('h1', {}, `Join ${g.name}`),
     h('p', {}, `${names} ${g.people === 1 ? 'is' : 'are'} here${g.agents ? `, with ${g.agents} ${g.agents === 1 ? 'agent' : 'agents'}` : ''}.`),
-    h('p', { class: 'muted' }, 'Skillnet is a place to share agent skills and talk with people and their agents. Your agent joins only if you turn it on, and you choose what it may say.'),
+    h('p', { class: 'muted' }, 'Rucksack is a place to share agent skills and talk with people and their agents. Your agent joins only if you turn it on, and you choose what it may say.'),
     me ? h('button', { class: 'primary', onclick: act(async () => { const r = await api('POST', '/api/convos/join', { code }); go(`/chat/${r.convo.id}`); }) }, 'Join the conversation')
       : h('a', { class: 'btn primary', href: `/signin?mode=signup&next=${encodeURIComponent(location.pathname + location.search)}` }, 'Sign up to join')));
 }
@@ -332,7 +332,7 @@ function planCards(plans) {
     card('Team', plans.team, ['Everything in Free', 'Any number of people', 'Required skills pushed to every member', 'Roles: owner, admin, editor, member', 'Suggested changes with review'],
       h('a', { class: 'btn primary', href: '/signin?mode=signup&next=/orgs' }, 'Start a team')),
     card('Enterprise', 'Talk to us', ['Everything in Team', 'Single sign-on', 'Central control over which agents reach which tools', 'Your own server, if you need it'],
-      h('a', { class: 'btn', href: 'mailto:lance@servantventures.com?subject=Skillnet%20Enterprise' }, 'Email us')));
+      h('a', { class: 'btn', href: 'mailto:lance@servantventures.com?subject=Rucksack%20Enterprise' }, 'Email us')));
 }
 async function landing() {
   const plans = await plansP;
@@ -340,16 +340,16 @@ async function landing() {
   fill(
     h('section', { class: 'hero' },
       h('h1', {}, 'Your team\'s agent skills, in every agent, with the right people'),
-      h('p', { class: 'lead' }, 'Write a skill once. Skillnet puts it in Claude Code, Claude, Cursor, Codex and Pi on every machine your team uses, and you decide who gets which skill.'),
+      h('p', { class: 'lead' }, 'Write a skill once. Rucksack puts it in Claude Code, Claude, Cursor, Codex and Pi on every machine your team uses, and you decide who gets which skill.'),
       h('div', { class: 'inline' }, h('a', { class: 'btn primary', href: '/signin?mode=signup' }, 'Get started free'), h('a', { class: 'btn', href: '/pricing' }, 'See pricing'))),
     h('div', { class: 'feats' },
-      feat('Sign in, no setup', 'Add Skillnet to Claude or Claude Code as a connector and sign in. Skills show up in the next chat. Nothing to install.'),
+      feat('Sign in, no setup', 'Add Rucksack to Claude or Claude Code as a connector and sign in. Skills show up in the next chat. Nothing to install.'),
       feat('Share at the right level', 'Each skill is private, for friends, for your organization or for everyone. Change it any time.'),
       feat('Required skills', 'Admins mark skills as required, and every member\'s agents get them and every update within seconds.'),
       feat('Review before it ships', 'Editors publish. Everyone else suggests changes, and an editor approves them. Every version is kept and can be rolled back.')),
     h('h2', {}, 'How it works'),
     h('ol', { class: 'steps' }, h('li', {}, 'Create an account and an organization for your team.'), h('li', {}, 'Send your team the invite link.'),
-      h('li', {}, 'Everyone adds the Skillnet connector to their agent and signs in.'), h('li', {}, 'Publish a skill. It reaches everyone who should have it.')),
+      h('li', {}, 'Everyone adds the Rucksack connector to their agent and signs in.'), h('li', {}, 'Publish a skill. It reaches everyone who should have it.')),
     h('h2', {}, 'Pricing'), planCards(plans));
 }
 async function pricing() {
@@ -375,7 +375,7 @@ const pages = {
         h('label', { for: 'f-pw' }, 'Password'), h('input', { id: 'f-pw', name: 'password', type: 'password', required: true, minlength: 8, autocomplete: up ? 'new-password' : 'current-password' }),
         h('button', { class: 'primary' }, up ? 'Create account' : 'Sign in'), err);
       fill(
-        h('h1', {}, up ? 'Create your Skillnet account' : 'Sign in to Skillnet'),
+        h('h1', {}, up ? 'Create your Rucksack account' : 'Sign in to Rucksack'),
         h('p', { class: 'lead' }, 'Share agent skills with friends and your organization. They sync to Claude Code, Pi, Codex and other agents on every machine you use.'),
         form,
         h('p', {}, h('a', { href: '#', onclick: (e) => { e.preventDefault(); mode = up ? 'signin' : 'signup'; draw(); } }, up ? 'I already have an account' : 'Create an account')),
@@ -588,30 +588,30 @@ const pages = {
     let key = sessionStorage.getItem('sn-new-key') || '';
     const pull = () => `curl -fsSL -H "Authorization: Bearer $SKILLNET_KEY" ${origin}/api/pull.sh | sh`;
     const steps = (...items) => h('ol', { class: 'steps' }, items.map((x) => h('li', {}, x)));
-    const signIn = 'Sign in to Skillnet in the window that opens and choose Allow.';
+    const signIn = 'Sign in to Rucksack in the window that opens and choose Allow.';
     const PLACES = {
       claude: ['Claude', () => [
         steps('In Claude (desktop app, claude.ai or the phone app) open Settings, then Connectors, then Add custom connector.',
-          ['Name it Skillnet and paste this address:', snippet(url)], `Choose Connect. ${signIn}`),
-        h('p', {}, 'That covers Claude Code too, including cloud sessions. On a Team or Enterprise plan an owner can add it once for everyone in Organization settings, Connectors. If Claude Code asks, type /mcp and choose Skillnet to sign in.')]],
+          ['Name it Rucksack and paste this address:', snippet(url)], `Choose Connect. ${signIn}`),
+        h('p', {}, 'That covers Claude Code too, including cloud sessions. On a Team or Enterprise plan an owner can add it once for everyone in Organization settings, Connectors. If Claude Code asks, type /mcp and choose Rucksack to sign in.')]],
       code: ['Claude Code', () => [
-        h('p', {}, 'Run this once in a terminal. It adds Skillnet for every project on this machine:'),
-        snippet(`claude mcp add --transport http --scope user skillnet ${url}`),
-        steps('Start Claude Code and type /mcp.', `Choose skillnet, then Authenticate. ${signIn}`, 'Ask Claude Code “what Skillnet skills do I have?”'),
+        h('p', {}, 'Run this once in a terminal. It adds Rucksack for every project on this machine:'),
+        snippet(`claude mcp add --transport http --scope user rucksack ${url}`),
+        steps('Start Claude Code and type /mcp.', `Choose rucksack, then Authenticate. ${signIn}`, 'Ask Claude Code “what Rucksack skills do I have?”'),
         h('p', {}, 'Want the skills as real files in ~/.claude/skills, so they load without asking and work offline? Run this instead; it keeps them in sync:'),
         snippet(`curl -fsSL ${origin}/install.sh | sh`)]],
       cursor: ['Cursor', () => [
-        h('p', {}, h('a', { class: 'btn primary', href: `cursor://anysphere.cursor-deeplink/mcp/install?name=skillnet&config=${btoa(JSON.stringify({ url }))}` }, 'Add to Cursor')),
-        h('p', {}, `Then choose Connect next to Skillnet in Cursor's MCP settings. ${signIn} Or add it by hand in Settings, MCP, with this address:`), snippet(url)]],
+        h('p', {}, h('a', { class: 'btn primary', href: `cursor://anysphere.cursor-deeplink/mcp/install?name=rucksack&config=${btoa(JSON.stringify({ url }))}` }, 'Add to Cursor')),
+        h('p', {}, `Then choose Connect next to Rucksack in Cursor's MCP settings. ${signIn} Or add it by hand in Settings, MCP, with this address:`), snippet(url)]],
       vscode: ['VS Code', () => [
-        h('p', {}, h('a', { class: 'btn primary', href: `vscode:mcp/install?${encodeURIComponent(JSON.stringify({ name: 'skillnet', type: 'http', url }))}` }, 'Add to VS Code')),
+        h('p', {}, h('a', { class: 'btn primary', href: `vscode:mcp/install?${encodeURIComponent(JSON.stringify({ name: 'rucksack', type: 'http', url }))}` }, 'Add to VS Code')),
         h('p', {}, `Then start the server when VS Code asks. ${signIn}`)]],
       chatgpt: ['ChatGPT', () => [
         steps('In ChatGPT open Settings, then Apps and Connectors, then Create (turn on developer mode under Advanced if you do not see it).',
-          ['Name it Skillnet, paste this address and choose OAuth:', snippet(url)], signIn)]],
+          ['Name it Rucksack, paste this address and choose OAuth:', snippet(url)], signIn)]],
       other: ['Codex, Grok and others', () => [
         h('p', {}, `Any app that takes a remote MCP server: add one with this address. No key or header is needed; ${signIn.toLowerCase()}`), snippet(url),
-        h('p', {}, 'For apps that take a config file:'), snippet(JSON.stringify({ mcpServers: { skillnet: { url } } }, null, 2))]],
+        h('p', {}, 'For apps that take a config file:'), snippet(JSON.stringify({ mcpServers: { rucksack: { url } } }, null, 2))]],
       scripts: ['Scripts and cloud jobs', () => [
         h('p', {}, 'Only for jobs with no one there to sign in, like CI. Make a key, store it as a secret named SKILLNET_KEY, and this line writes your skills into the agent folders:'),
         key ? h('p', { class: 'card notice' }, 'Your new key: ', h('code', {}, key), ' ', copyBtn(key), h('br'), 'Copy it now; it is not shown again.')
@@ -629,7 +629,7 @@ const pages = {
       body.replaceChildren(...PLACES[place][1]().filter(Boolean));
     };
     fill(h('h1', {}, 'Connect an agent'),
-      h('p', { class: 'lead' }, 'Add Skillnet to your app by its address and sign in. Your agent then sees your skills at the start of every session, and updates show up without reinstalling anything.'),
+      h('p', { class: 'lead' }, 'Add Rucksack to your app by its address and sign in. Your agent then sees your skills at the start of every session, and updates show up without reinstalling anything.'),
       tabs, body);
     draw();
   },
@@ -645,7 +645,7 @@ const pages = {
       }) }, h('label', { for: 'd-code' }, 'Code'), h('input', { id: 'd-code', name: 'code', value: code, required: true, autocapitalize: 'characters' }), h('button', { class: 'primary' }, 'Approve'), msg));
   },
 
-  // The OAuth consent screen an app opens when someone adds Skillnet as a connector.
+  // The OAuth consent screen an app opens when someone adds Rucksack as a connector.
   async authorize() {
     const q = new URLSearchParams(location.search);
     const p = Object.fromEntries(['client_id', 'redirect_uri', 'code_challenge', 'code_challenge_method', 'state'].map((k) => [k, q.get(k)]));
@@ -654,7 +654,7 @@ const pages = {
     const c = await api('GET', `/api/oauth/client?client_id=${encodeURIComponent(p.client_id || '')}&redirect_uri=${encodeURIComponent(p.redirect_uri || '')}`);
     const send = (allow) => act(async () => { location.href = (await api('POST', '/api/oauth/approve', { ...p, scope, allow })).redirect; });
     fill(h('h1', {}, `Connect ${c.name}`),
-      h('p', { class: 'lead' }, `${c.name} wants to use Skillnet as @${me.user.handle}. It will be able to:`),
+      h('p', { class: 'lead' }, `${c.name} wants to use Rucksack as @${me.user.handle}. It will be able to:`),
       h('ul', {}, h('li', {}, 'Read your skills, your friends\' and your organizations\''), scope === 'write' && h('li', {}, 'Publish skills and suggest changes in your name')),
       h('p', { class: 'muted' }, `You go back to ${c.host} after this. Disconnect it any time on the Keys page.`),
       h('div', { class: 'inline' }, h('button', { class: 'primary', onclick: send(true) }, 'Allow'), h('button', { onclick: send(false) }, 'Cancel')));

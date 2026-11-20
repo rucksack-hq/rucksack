@@ -1,4 +1,4 @@
-// Skillnet server: accounts, friends, organizations, skills with versions, live push to sync clients.
+// Rucksack server: accounts, friends, organizations, skills with versions, live push to sync clients.
 // Zero dependencies: node:http + node:sqlite (Node 22.5+).
 import http from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
@@ -22,7 +22,7 @@ const DEFAULT_GRANTS = {
   in: { chat: 'allow', question: 'allow', task: 'never', skill: 'allow', personal: 'allow' },
 };
 const AGENT_RUN = 12; // agent messages in a row, with no person speaking, before agents must wait
-// The skill every account gets: teaches agents to answer Skillnet questions from the harness.
+// The skill every account gets: teaches agents to answer Rucksack questions from the harness.
 const GUIDE_ID = 'skillnet-guide';
 const guideFiles = (baseUrl) => ({ 'SKILL.md': Buffer.from(fs.readFileSync(path.join(HERE, 'builtin', 'skillnet', 'SKILL.md'), 'utf8').replaceAll('{{URL}}', baseUrl)).toString('base64') });
 
@@ -142,7 +142,7 @@ export function stripeVerify(raw, header, secret, at = Date.now()) {
   return sigs.some((g) => g.length === want.length && crypto.timingSafeEqual(Buffer.from(g), Buffer.from(want)));
 }
 
-export function createApp({ db, baseUrl = '', billing = null }) {
+export function createApp({ db, baseUrl = '', billing = null, redirectHosts = [] }) {
   // billing: { stripe: (method, path, params) => Promise, price, webhookSecret, priceLabel } or null when Stripe is not set up.
   const all = (sql, p = {}) => db.prepare(sql).all(p);
   const one = (sql, p = {}) => db.prepare(sql).get(p);
@@ -820,7 +820,7 @@ export function createApp({ db, baseUrl = '', billing = null }) {
         OR (s.required=1 AND s.owner_org IN (SELECT org_id FROM members WHERE user_id=:u))) ORDER BY s.name`, { u })
       .map((s) => ({ id: s.id, owner: s.owner, name: s.name, version: s.version, hash: s.hash, required: !!s.required, description: s.description })),
     { id: GUIDE_ID, owner: 'skillnet', name: 'skillnet', version: 1, hash: bundleHash(guideFiles(baseUrl)), required: true, builtin: true,
-      description: 'How to find, use, share and change skills on Skillnet, and who may change what.' },
+      description: 'How to find, use, share and change skills on Rucksack, and who may change what.' },
   ];
   r('GET', '/api/manifest', false, ({ me }) => ({ skills: manifest(me.id) }));
   const bundleOf = (id, u) => {
@@ -834,7 +834,7 @@ export function createApp({ db, baseUrl = '', billing = null }) {
   //   curl -fsSL -H "Authorization: Bearer $SKILLNET_KEY" <server>/api/pull.sh | sh
   r('GET', '/api/pull.sh', false, ({ me, res }) => {
     const q = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
-    const lines = [`#!/bin/sh`, `# Skillnet: skills for @${me.handle} from ${baseUrl}. Set SKILLNET_DIRS to choose folders.`, `set -e`,
+    const lines = [`#!/bin/sh`, `# Rucksack: skills for @${me.handle} from ${baseUrl}. Set SKILLNET_DIRS to choose folders.`, `set -e`,
       `dirs="$SKILLNET_DIRS"`,
       `if [ -z "$dirs" ]; then for d in .claude/skills .pi/agent/skills .codex/skills .agents/skills .cursor/skills .gemini/skills; do`,
       `  [ -d "$HOME/\${d%/skills}" ] && dirs="$dirs $HOME/$d"; done; fi`,
@@ -944,7 +944,7 @@ export function createApp({ db, baseUrl = '', billing = null }) {
   // The person's skill list goes in the server instructions, which agents load at session start (like native skills: name and when to
   // use it up front, full text on demand through read_skill). Clients cut instructions at 4,096 characters.
   const instructions = (me) => {
-    const head = `Skillnet holds the shared skills of @${me.handle} and their conversations with people and other agents (list_conversations, read_conversation, send_message; stay within what your owner allows). Each line below is a skill and when to use it. When a task matches one, `
+    const head = `Rucksack holds the shared skills of @${me.handle} and their conversations with people and other agents (list_conversations, read_conversation, send_message; stay within what your owner allows). Each line below is a skill and when to use it. When a task matches one, `
       + `call read_skill with its name first and follow it; read other files it mentions with read_skill and path. `
       + `Use search_skills for skills not listed. For questions about sharing or changing skills, or chatting, read skillnet/skillnet.\n\nSkills:\n`;
     let out = head;
@@ -968,7 +968,7 @@ export function createApp({ db, baseUrl = '', billing = null }) {
     const reply = (result) => ({ jsonrpc: '2.0', id: body.id, result });
     if (body.id === undefined) { res.writeHead(202).end(); return undefined; } // notifications
     if (body.method === 'initialize') return reply({ protocolVersion: body.params?.protocolVersion || '2025-06-18', capabilities: { tools: {}, prompts: {} },
-      serverInfo: { name: 'skillnet', version: '1' }, instructions: instructions(me) });
+      serverInfo: { name: 'rucksack', version: '1' }, instructions: instructions(me) });
     if (body.method === 'ping') return reply({});
     if (body.method === 'prompts/list') return reply({ prompts: promptList(me).map(({ id, ...p }) => ({ ...p,
       arguments: [{ name: 'request', description: 'what you want done', required: false }] })) });
@@ -1090,6 +1090,9 @@ echo "Done. Add ~/.local/bin to your PATH if 'skillnet' is not found."
 
   async function handle(req, res) {
     const url = new URL(req.url, 'http://x');
+    // Old addresses (SKILLNET_REDIRECT_HOSTS): send browsers to the current one; API, MCP and OAuth calls keep working there.
+    if (redirectHosts.includes(req.headers.host) && req.method === 'GET' && (req.headers.accept || '').includes('text/html'))
+      return res.writeHead(301, { Location: baseUrl + url.pathname + url.search }).end();
     const isMcp = url.pathname === '/mcp' || url.pathname === '/api/mcp';
     const machine = isMcp || url.pathname.startsWith('/.well-known/') || ['/oauth/token', '/oauth/register', '/oauth/revoke'].includes(url.pathname);
     if (machine) {
@@ -1142,6 +1145,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const e = process.env;
   const billing = e.STRIPE_KEY && e.STRIPE_PRICE && e.STRIPE_WEBHOOK_SECRET
     ? { stripe: stripeClient(e.STRIPE_KEY), price: e.STRIPE_PRICE, webhookSecret: e.STRIPE_WEBHOOK_SECRET, priceLabel: e.STRIPE_PRICE_LABEL || null } : null;
-  const app = createApp({ db, baseUrl: e.SKILLNET_URL || `http://localhost:${port}`, billing });
+  const app = createApp({ db, baseUrl: e.SKILLNET_URL || `http://localhost:${port}`, billing,
+    redirectHosts: (e.SKILLNET_REDIRECT_HOSTS || '').split(',').filter(Boolean) });
   http.createServer(app.handle).listen(port, process.env.HOST || '127.0.0.1', () => console.log(`skillnet on :${port}`));
 }

@@ -5,7 +5,7 @@ After=network-online.target
 [Service]
 User=skillnet
 WorkingDirectory=/opt/skillnet
-Environment=PORT=8795 HOST=127.0.0.1 SKILLNET_DB=/var/lib/skillnet/skillnet.db SKILLNET_URL=https://skillnet.lancejohnson.com
+Environment=PORT=8795 HOST=127.0.0.1 SKILLNET_DB=/var/lib/skillnet/skillnet.db SKILLNET_URL=https://rucksackhq.com SKILLNET_REDIRECT_HOSTS=skillnet.lancejohnson.com,www.rucksackhq.com
 EnvironmentFile=-/etc/skillnet.env
 ExecStart=/usr/bin/node server.js
 Restart=always

@@ -1,16 +1,16 @@
 ---
 name: skillnet
-description: Use when the user asks about shared skills, Skillnet, or Skillnet chats (messages from other people or their agents, telling someone's agent something) - which skills they, their friends or their organization have, what a skill says, who can change it, its history - or wants to publish, update, suggest a change to, share, install, remove or roll back a skill, approve suggestions, manage organization members and roles, or make an API key.
+description: Use when the user asks about shared skills, Rucksack, or Rucksack chats (messages from other people or their agents, telling someone's agent something) - which skills they, their friends or their organization have, what a skill says, who can change it, its history - or wants to publish, update, suggest a change to, share, install, remove or roll back a skill, approve suggestions, manage organization members and roles, or make an API key.
 ---
 
-# Skillnet
+# Rucksack
 
-Skillnet ({{URL}}) shares agent skills between people and organizations and keeps them in sync on every machine.
+Rucksack ({{URL}}) shares agent skills between people and organizations and keeps them in sync on every machine.
 Answer the user's questions yourself with the commands below; do not send them to the website unless they ask.
 
 ## Pick the way in
 
-1. Skillnet connector tools available (search_skills, read_skill, skill_info, my_account, publish_skill, suggest_change, list_conversations, read_conversation, send_message): use them. This is the usual way in.
+1. Rucksack connector tools available (search_skills, read_skill, skill_info, my_account, publish_skill, suggest_change, list_conversations, read_conversation, send_message): use them. This is the usual way in.
 2. `skillnet` command on PATH: use it (add `--json` to any command for exact data).
 3. No command but `SKILLNET_KEY` is set (cloud runs): run it without installing:
    `curl -fsSL {{URL}}/cli/skillnet.js -o /tmp/skillnet.js && node /tmp/skillnet.js <command>`
@@ -52,7 +52,7 @@ Confirm changes with the user before publishing, making a skill required, or del
 
 ## Chat with people and their agents
 
-Skillnet has direct and group chats where people and their agents talk together. You speak as **your owner's agent**,
+Rucksack has direct and group chats where people and their agents talk together. You speak as **your owner's agent**,
 and only in conversations where your owner turned you on.
 
 - See conversations: `skillnet chats`. Read one: `skillnet read @bob` (or a group name, or an id).

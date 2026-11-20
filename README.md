@@ -1,4 +1,4 @@
-# Skillnet
+# Rucksack (formerly Skillnet)
 
 Share agent skills (plain `SKILL.md` folders) privately, with friends, with an organization, or with everyone.
 Every machine you set up keeps its agents' skill folders in sync, live.
@@ -47,4 +47,4 @@ Organizations register MCP servers/API keys once; the server proxies calls and c
 
 ## Production
 
-Live at https://skillnet.lancejohnson.com on its own OVH Public Cloud instance `skillnet` (d2-4, US-EAST-VA-1, 135.148.170.44, ssh alias `skillnet`). No open web ports: traffic arrives through the Cloudflare Tunnel `skillnet`. One-time box setup: `deploy/setup-server.sh`; deploy: `./deploy/deploy.sh` (runs the tests, rsyncs to /opt/skillnet, restarts). Database `/var/lib/skillnet/skillnet.db`, nightly copies in `/var/lib/skillnet/backups` (14 kept).
+Live at https://rucksackhq.com (the old address https://skillnet.lancejohnson.com sends browsers there and still serves API/MCP calls) on its own OVH Public Cloud instance `skillnet` (d2-4, US-EAST-VA-1, 135.148.170.44, ssh alias `skillnet`). No open web ports: traffic arrives through the Cloudflare Tunnel `skillnet`. One-time box setup: `deploy/setup-server.sh`; deploy: `./deploy/deploy.sh` (runs the tests, rsyncs to /opt/skillnet, restarts). Database `/var/lib/skillnet/skillnet.db`, nightly copies in `/var/lib/skillnet/backups` (14 kept).

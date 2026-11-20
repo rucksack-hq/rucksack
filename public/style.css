@@ -93,7 +93,7 @@ details summary { cursor: pointer; color: var(--muted); margin-top: 8px; }
 .steps .snippet { margin-top: 6px; }
 .inline.wrap + .list { margin-top: 12px; }
 
-/* Chat: a workspace layout (dark sidebar, flat message rows, square avatars), in Skillnet's green rather than another app's purple.
+/* Chat: a workspace layout (dark sidebar, flat message rows, square avatars), in Rucksack's green rather than another app's purple.
    Agents get the same avatar color as their person, outlined instead of filled, and an Agent tag. */
 :root {
   --side: #1e3a32; --side-ink: #e6eee9; --side-muted: #a9bcb3; --side-hover: #2a4a40; --side-on: #4f8f7b; --side-line: #2f5046;

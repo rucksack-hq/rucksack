@@ -146,7 +146,7 @@ test('accounts, friends, organizations, sync', async (t) => {
 
     // MCP: same answers as the command line.
     const mcp = async (key, method, params) => (await as('anon', 'POST', '/mcp', { jsonrpc: '2.0', id: 1, method, params }, bear(key))).result;
-    assert.equal((await mcp(read, 'initialize', {})).serverInfo.name, 'skillnet');
+    assert.equal((await mcp(read, 'initialize', {})).serverInfo.name, 'rucksack');
     assert.ok((await mcp(read, 'tools/list')).tools.some((x) => x.name === 'suggest_change'));
     const text = async (key, name, args) => (await mcp(key, 'tools/call', { name, arguments: args })).content[0].text;
     assert.match(await text(read, 'search_skills', { query: 'hand' }), /acme\/handbook/);
