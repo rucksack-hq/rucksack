@@ -86,7 +86,7 @@ body.site .top { background: var(--color-paper); border-color: var(--color-rule)
 .works ul { display: flex; flex-wrap: wrap; gap: var(--space-xs) var(--space-xl); margin: 0; padding: 0; list-style: none; font: 600 var(--text-lg)/1.2 var(--font-display); letter-spacing: var(--tracking-display); color: var(--color-ink-2); }
 
 /* Sections */
-.how, .control, .pricing { padding-block: var(--section-gap-s) 0; }
+.how, .load, .control, .pricing { padding-block: var(--section-gap-s) 0; }
 .sec-head { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--space-md) var(--space-2xl); align-items: end; margin-bottom: var(--space-xl); }
 .steps3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-md); margin: 0; padding: 0; list-style: none; }
 .steps3 li { display: grid; grid-template-rows: auto auto auto 1fr; gap: var(--space-sm); padding: var(--space-lg); }
@@ -102,6 +102,12 @@ pre.mini { align-self: end; margin: var(--space-xs) 0 0; padding: var(--space-md
 .sw.on { background: var(--color-accent); }
 .sw.on::after { left: 16px; }
 
+.loads { list-style: none; counter-reset: l; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-xl); margin: 0; padding: 0; border-top: var(--rule-hair) solid var(--color-ink); }
+.loads li { counter-increment: l; padding-top: var(--space-lg); }
+.loads li::before { content: counter(l); display: block; font: 600 var(--text-md)/1 var(--font-mono); color: var(--color-accent); margin-bottom: var(--space-sm); }
+.loads h3 { font: 600 var(--text-md)/1.35 var(--font-display); margin: 0 0 var(--space-xs); }
+.loads p { margin: 0; color: var(--color-ink-2); }
+@media (max-width: 60rem) { .loads { grid-template-columns: 1fr; gap: var(--space-md); } }
 .ledger-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 var(--space-2xl); margin: 0; border-top: var(--rule-hair) solid var(--color-ink); }
 .ledger-list > div { display: grid; grid-template-columns: 11rem minmax(0, 1fr); gap: var(--space-md); padding-block: var(--space-lg); border-bottom: var(--rule-hair) solid var(--color-rule); }
 .ledger-list dt { font: 600 var(--text-md)/1.35 var(--font-display); }
@@ -152,6 +158,7 @@ pre.mini { align-self: end; margin: var(--space-xs) 0 0; padding: var(--space-md
   body.site nav a { white-space: nowrap; }
   .ledger td, .ledger th { padding-inline: var(--space-sm); }
   .ledger th:last-child, .ledger td:last-child { display: none; }
+  .ledger tbody tr:last-child, .panel-head .tab:not(.on) { display: none; }
   .ledger-list > div { grid-template-columns: minmax(0, 1fr); gap: var(--space-2xs); }
   .works ul { gap: var(--space-2xs) var(--space-lg); font-size: var(--text-md); }
 }
