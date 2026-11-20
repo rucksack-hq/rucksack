@@ -668,13 +668,17 @@ const pages = {
       claude: ['Claude', () => [
         steps('In Claude (desktop app, claude.ai or the phone app) open Settings, then Connectors, then Add custom connector.',
           ['Name it Rucksack and paste this address:', snippet(url)], `Choose Connect. ${signIn}`),
-        h('p', {}, 'That covers Claude Code too, including cloud sessions. On a Team or Enterprise plan an owner can add it once for everyone in Organization settings, Connectors. If Claude Code asks, type /mcp and choose Rucksack to sign in.')]],
+        h('p', {}, 'On a Team or Enterprise plan an owner can add it once for everyone in Organization settings, Connectors. It also reaches Claude Code cloud sessions. For Claude Code on your own computer, use the Claude Code tab: skills arrive as files there.')]],
       code: ['Claude Code', () => [
-        h('p', {}, 'Run this once in a terminal. It adds Rucksack for every project on this machine:'),
-        snippet(`claude mcp add --transport http --scope user rucksack ${url}`),
-        steps('Start Claude Code and type /mcp.', `Choose rucksack, then Authenticate. ${signIn}`, 'Ask Claude Code “what Rucksack skills do I have?”'),
-        h('p', {}, 'Want the skills as real files in ~/.claude/skills, so they load without asking and work offline? Run this instead; it keeps them in sync:'),
-        snippet(`curl -fsSL ${origin}/install.sh | sh`)]],
+        h('p', {}, 'Run these two lines once in a terminal:'),
+        snippet(`claude plugin marketplace add ${origin}/plugin.git\nclaude plugin install rucksack@rucksack`),
+        steps('Start a new Claude Code session. It shows a link and a code: open the link and approve this computer.',
+          'Your skills arrive in ~/.claude/skills within seconds and stay current as they change, with no restart. They work offline too.',
+          `For search, chat and shared services, type /mcp, choose rucksack, then Authenticate. ${signIn}`)]],
+      local: ['Codex, Pi and other coding agents', () => [
+        h('p', {}, 'Run this once in a terminal. It signs this computer in and keeps your skills as files in each agent’s skill folder that exists here (Codex, Pi, Cursor, Gemini and ~/.agents/skills):'),
+        snippet(`curl -fsSL ${origin}/install.sh | sh`),
+        h('p', {}, 'Pi reloads skills by itself when they change. Codex and the others pick changes up in their next session.')]],
       cursor: ['Cursor', () => [
         h('p', {}, h('a', { class: 'btn primary', href: `cursor://anysphere.cursor-deeplink/mcp/install?name=rucksack&config=${btoa(JSON.stringify({ url }))}` }, 'Add to Cursor')),
         h('p', {}, `Then choose Connect next to Rucksack in Cursor's MCP settings. ${signIn} Or add it by hand in Settings, MCP, with this address:`), snippet(url)]],
@@ -684,7 +688,7 @@ const pages = {
       chatgpt: ['ChatGPT', () => [
         steps('In ChatGPT open Settings, then Apps and Connectors, then Create (turn on developer mode under Advanced if you do not see it).',
           ['Name it Rucksack, paste this address and choose OAuth:', snippet(url)], signIn)]],
-      other: ['Codex, Grok and others', () => [
+      other: ['Other apps', () => [
         h('p', {}, `Any app that takes a remote MCP server: add one with this address. No key or header is needed; ${signIn.toLowerCase()}`), snippet(url),
         h('p', {}, 'For apps that take a config file:'), snippet(JSON.stringify({ mcpServers: { rucksack: { url } } }, null, 2))]],
       scripts: ['Scripts and cloud jobs', () => [
@@ -695,7 +699,8 @@ const pages = {
         h('p', {}, 'Or call the API with the key as a bearer token:'), snippet(`curl -H "Authorization: Bearer $SKILLNET_KEY" "${origin}/api/skills?q=deploy"`)]],
     };
     let place = new URLSearchParams(location.search).get('for');
-    if (!PLACES[place]) place = 'claude';
+    // Coding agents on a computer get files; phones get the connector.
+    if (!PLACES[place]) place = /iPhone|iPad|Android/.test(navigator.userAgent) ? 'claude' : 'code';
     const body = h('div', { class: 'stack-gap' });
     const tabs = h('div', { class: 'seg wrap', role: 'tablist' });
     const draw = () => {
@@ -704,7 +709,7 @@ const pages = {
       body.replaceChildren(...PLACES[place][1]().filter(Boolean));
     };
     fill(h('h1', {}, 'Connect an agent'),
-      h('p', { class: 'lead' }, 'Add Rucksack to your app by its address and sign in. Your agent then sees your skills at the start of every session, and updates show up without reinstalling anything.'),
+      h('p', { class: 'lead' }, 'Coding agents on your computer get your skills as real files, kept current as they change. Chat apps and phones connect by address and sign in.'),
       tabs, body);
     draw();
   },

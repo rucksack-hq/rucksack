@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gitMirror } from './git.js';
+import { buildPluginRepo, servePlugin } from './plugin.js';
 import { accessApi, ACCESS_SCHEMA } from './access.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -1059,7 +1060,10 @@ export function createApp({ db, baseUrl = '', billing = null, redirectHosts = []
   const msgText = (m) => `[${new Date(m.created).toISOString().slice(0, 16).replace('T', ' ')}] ${m.agent ? `@${m.from.handle}'s agent` : `@${m.from.handle}`}${m.kind === 'chat' ? '' : ` (${m.kind})`}${m.status === 'sent' ? '' : ` [${m.status}]`}: ${m.kind === 'joined' ? 'joined' : m.kind === 'skill' ? `shared skill ${m.data.skill.ref}: ${m.data.skill.description} ${m.text}` : m.text}`;
   // The person's skill list goes in the server instructions, which agents load at session start (like native skills: name and when to
   // use it up front, full text on demand through read_skill). Clients cut instructions at 4,096 characters.
-  const instructions = (me) => {
+  const instructions = (me, local) => {
+    if (local) return `Rucksack holds the shared skills of @${me.handle}. They are installed on this machine as skill files by the Rucksack plugin and load like any other skill. `
+      + `This connector adds search_skills (skills not installed), conversations with people and other agents (list_conversations, read_conversation, send_message; stay within what your owner allows) `
+      + `and shared services (list_services, call_service). For questions about sharing or changing skills, use the skillnet skill.`;
     const head = `Rucksack holds the shared skills of @${me.handle} and their conversations with people and other agents (list_conversations, read_conversation, send_message; stay within what your owner allows). Each line below is a skill and when to use it. When a task matches one, `
       + `call read_skill with its name first and follow it; read other files it mentions with read_skill and path. `
       + `Use search_skills for skills not listed. For questions about sharing or changing skills, or chatting, read skillnet/skillnet.\n\nSkills:\n`;
@@ -1080,13 +1084,19 @@ export function createApp({ db, baseUrl = '', billing = null, redirectHosts = []
       return { name, title: `${s.owner}/${s.name}`, description: s.description, id: s.id };
     });
   };
-  r('POST', '/api/mcp', false, async ({ me, body, res }) => {
+  // The Claude Code plugin sends X-Rucksack-Files: 1. Once a machine of this person syncs files (a recent sign-in from the command-line tool),
+  // the skill list and prompts are left out so the agent does not see every skill twice.
+  // shortcut: any of the person's machines counts, not this one; tie the connector to its machine if that misleads.
+  const syncsFiles = (req, me) => req.headers['x-rucksack-files'] === '1'
+    && !!one(`SELECT 1 x FROM tokens WHERE user_id=:u AND kind='cli' AND used>:t`, { u: me.id, t: now() - 30 * 864e5 });
+  r('POST', '/api/mcp', false, async ({ me, body, res, req }) => {
     const reply = (result) => ({ jsonrpc: '2.0', id: body.id, result });
+    const local = syncsFiles(req, me);
     if (body.id === undefined) { res.writeHead(202).end(); return undefined; } // notifications
     if (body.method === 'initialize') return reply({ protocolVersion: body.params?.protocolVersion || '2025-06-18', capabilities: { tools: {}, prompts: { listChanged: true } },
-      serverInfo: { name: 'rucksack', version: '1' }, instructions: instructions(me) });
+      serverInfo: { name: 'rucksack', version: '1' }, instructions: instructions(me, local) });
     if (body.method === 'ping') return reply({});
-    if (body.method === 'prompts/list') return reply({ prompts: promptList(me).map(({ id, ...p }) => ({ ...p,
+    if (body.method === 'prompts/list') return reply({ prompts: local ? [] : promptList(me).map(({ id, ...p }) => ({ ...p,
       arguments: [{ name: 'request', description: 'what you want done', required: false }] })) });
     if (body.method === 'prompts/get') {
       const p = promptList(me).find((x) => x.name === body.params?.name);
@@ -1139,6 +1149,7 @@ echo "Done. Add ~/.local/bin to your PATH if 'skillnet' is not found."
   const mirror = gitDir && gitMirror({ gitDir, baseUrl, one, all, run, getOrg, role, isEditor, isAdmin, pushSkill, deleteSkill, propose, closeProposal,
     frontmatter, rid, now, hooks, NAME_RE });
   if (gitDir) fs.mkdirSync(gitDir, { recursive: true });
+  const pluginRepo = gitDir && buildPluginRepo(gitDir, baseUrl, fs.readFileSync(path.join(HERE, 'cli', 'skillnet.js'), 'utf8'));
 
   const readBody = async (req) => {
     const chunks = []; let n = 0;
@@ -1224,7 +1235,7 @@ echo "Done. Add ~/.local/bin to your PATH if 'skillnet' is not found."
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('Access-Control-Expose-Headers', 'WWW-Authenticate, Mcp-Session-Id');
       if (req.method === 'OPTIONS') return res.writeHead(204, { 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Authorization, Content-Type, Mcp-Protocol-Version, Mcp-Session-Id', 'Access-Control-Max-Age': '86400' }).end();
+        'Access-Control-Allow-Headers': 'Authorization, Content-Type, Mcp-Protocol-Version, Mcp-Session-Id, X-Rucksack-Files', 'Access-Control-Max-Age': '86400' }).end();
       if (!isMcp) { try { return await oauth(req, res, url); } catch (e) { return json(res, e.status || 500, { error: 'invalid_request', error_description: e.status ? e.message : 'server error' }); } }
       if (req.method === 'GET' && !(req.headers.accept || '').includes('text/event-stream')) return res.writeHead(405, { Allow: 'GET, POST' }).end();
       if (!['GET', 'POST'].includes(req.method)) return res.writeHead(405, { Allow: 'GET, POST' }).end();
@@ -1235,6 +1246,7 @@ echo "Done. Add ~/.local/bin to your PATH if 'skillnet' is not found."
     if (url.pathname === '/install.sh') return res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' }).end(installScript());
     const cli = /^\/cli\/(skillnet\.js|pi-skillnet-reload\.ts)$/.exec(url.pathname)?.[1];
     if (cli) return res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' }).end(fs.readFileSync(path.join(HERE, 'cli', cli)));
+    if (url.pathname.startsWith('/plugin.git/') && req.method === 'GET') return servePlugin(pluginRepo, url, res);
     if (url.pathname === '/mcp') url.pathname = '/api/mcp';
     if (!url.pathname.startsWith('/api/')) return serveStatic(url, res);
     try {

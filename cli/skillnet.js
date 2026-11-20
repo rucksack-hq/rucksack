@@ -12,6 +12,7 @@ const CONF_DIR = process.env.SKILLNET_HOME || path.join(HOME, '.config', 'skilln
 const CONF = path.join(CONF_DIR, 'config.json');
 const CHANGED = path.join(CONF_DIR, 'changed'); // touched after every sync that changed files; the Pi extension watches it
 const MARKER = '.skillnet.json';
+const PENDING = path.join(CONF_DIR, 'pending-sign-in.json'); // the plugin's open device sign-in
 const SKIP = new Set(['.git', 'node_modules', '.DS_Store', MARKER]);
 // Skill folders of each agent. Claude Code hot-reloads ~/.claude/skills; Pi reloads through the skillnet extension.
 const KNOWN_TARGETS = ['.claude/skills', '.pi/agent/skills', '.codex/skills', '.agents/skills', '.cursor/skills', '.gemini/skills'];
@@ -39,8 +40,10 @@ async function api(method, p, body, c = conf()) {
   return out;
 }
 
+// Claude Code's folder moves with CLAUDE_CONFIG_DIR (a second Claude Code profile).
+const claudeSkills = () => path.join(process.env.CLAUDE_CONFIG_DIR || path.join(HOME, '.claude'), 'skills');
 export function targets(c = conf()) {
-  const list = c.targets || KNOWN_TARGETS.map((t) => path.join(HOME, t)).filter((t) => fs.existsSync(path.dirname(t)));
+  const list = c.targets || KNOWN_TARGETS.map((t) => (t === '.claude/skills' ? claudeSkills() : path.join(HOME, t))).filter((t) => fs.existsSync(path.dirname(t)));
   const seen = new Set(), out = [];
   for (const t of list) {
     fs.mkdirSync(t, { recursive: true });
@@ -159,6 +162,10 @@ async function login(server) {
   const d = await api('POST', '/api/device/start', { label }, { server });
   log(`\nApprove this device at:\n  ${d.verify_url}\nCode: ${d.user_code}\n`);
   try { execFileSync(process.platform === 'darwin' ? 'open' : 'xdg-open', [d.verify_url], { stdio: 'ignore' }); } catch {}
+  return waitForApproval(server, d);
+}
+async function waitForApproval(server, d) {
+  const c = conf();
   for (;;) {
     await new Promise((r) => setTimeout(r, d.interval * 1000));
     try {
@@ -168,6 +175,41 @@ async function login(server) {
       return log(`signed in as @${me.user.handle}`);
     } catch (e) { if (e.status !== 428) die(e.message); }
   }
+}
+
+// Claude Code plugin, at session start: sync if signed in, else start one device sign-in and say where to approve it.
+// Prints only the hook's JSON; a background process finishes the sign-in, syncs and turns on live updates.
+async function hook(server) {
+  const say = (msg) => console.log(JSON.stringify({ systemMessage: msg,
+    hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: `Tell the user once, early: ${msg}` } }));
+  const quiet = console.log; console.log = () => {};
+  try {
+    const c = conf();
+    if (c.token && c.server) {
+      try { await sync({ quiet: true }); }
+      catch (e) { if (e.status !== 401) return; saveConf({ ...readJson(CONF, {}), token: undefined }); console.log = quiet; return hook(server); }
+      if (!c.service) { try { serviceInstall(); saveConf({ ...readJson(CONF, {}), service: true }); } catch {} }
+      return;
+    }
+    server = (server || c.server || '').replace(/\/+$/, '');
+    let d = readJson(PENDING, null);
+    if (!d || d.server !== server || d.until < Date.now()) {
+      d = { ...(await api('POST', '/api/device/start', { label: `${os.userInfo().username}@${os.hostname()} (Claude Code)` }, { server })), server, until: Date.now() + 14 * 60e3 };
+      fs.mkdirSync(CONF_DIR, { recursive: true }); fs.writeFileSync(PENDING, JSON.stringify(d), { mode: 0o600 });
+      if (!process.env.SKILLNET_HOOK_NOWAIT) spawn(process.execPath, [fileURLToPath(import.meta.url), 'hook-wait'], { detached: true, stdio: 'ignore', env: process.env }).unref();
+    }
+    console.log = quiet;
+    say(`Rucksack: to get your skills on this machine, open ${d.verify_url} and approve code ${d.user_code}. They arrive within seconds, no restart needed.`);
+  } catch { /* never block a session */ } finally { console.log = quiet; }
+}
+async function hookWait() {
+  const d = readJson(PENDING, null);
+  if (!d) return;
+  try { await waitForApproval(d.server, d); } finally { fs.rmSync(PENDING, { force: true }); }
+  const c = readJson(CONF, {});
+  if (!c.targets) saveConf({ ...c, targets: [claudeSkills()] }); // the plugin fills Claude Code's folder only; install.sh covers the other agents
+  await sync({ quiet: true });
+  serviceInstall(); saveConf({ ...readJson(CONF, {}), service: true });
 }
 
 async function push(dir, flags) {
@@ -234,6 +276,7 @@ const userByHandle = (list, handle) => list.find((u) => u.handle === handle.repl
 
 // Run `skillnet watch` at login: launchd on macOS, a systemd user unit on Linux.
 function serviceInstall() {
+  if (process.env.SKILLNET_NO_SERVICE) return; // tests
   const node = process.execPath, me = fs.realpathSync(fileURLToPath(import.meta.url));
   const logf = path.join(CONF_DIR, 'watch.log');
   fs.mkdirSync(CONF_DIR, { recursive: true });
@@ -425,6 +468,8 @@ async function main() {
     case 'watch': await watch(); break;
     case 'targets': for (const t of targets()) log(t); break;
     case 'service': serviceInstall(); break;
+    case 'hook': await hook(rest[0]); break;
+    case 'hook-wait': await hookWait(); break;
     default: log(HELP);
   }
 }
