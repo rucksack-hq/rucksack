@@ -3,7 +3,7 @@
  * axes: light/grotesk-sans/cool · posture: restrained · contrast: pass · fold: pass · v2.0.0 */
 /* Hallmark · pre-emit critique: P4 H4 E4 S3 R4 V4 · weakest: S, sections are ruled lists on one paper; the graphite band and the hero stage carry the contrast */
 
-:root { --color-white: oklch(100% 0 0); --color-pending: var(--color-pending); --color-live: oklch(76% 0.13 150); --shadow-float: var(--shadow-float); }
+:root { --color-white: oklch(100% 0 0); --color-pending: oklch(52% 0.13 70); --color-live: oklch(76% 0.13 150); --shadow-float: 0 18px 40px -18px oklch(21% 0.028 262 / 0.5); }
 html, body { overflow-x: clip; }
 :focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
