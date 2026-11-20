@@ -253,37 +253,15 @@ button.ghost:hover, button.ghost[aria-expanded="true"] { background: var(--soft)
 .perm-table tr:last-child td { border-bottom: 0; }
 .perm-table .svc-name { font-weight: 600; color: var(--ink); }
 .perm-table .svc-desc { font-size: 13px; color: var(--muted); margin-top: 4px; overflow-wrap: anywhere; }
-.perm-table .lvl-cell { text-align: right; white-space: nowrap; }
-.perm-seg { display: inline-flex; border: 1px solid var(--line); border-radius: var(--r); overflow: hidden; background: var(--card); }
-.perm-seg button { border: 0; border-radius: 0; padding: 8px 12px; font-size: 13px; color: var(--muted); background: transparent; }
-.perm-seg button + button { border-left: 1px solid var(--line); }
-.perm-seg button.on { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
-/* Cross-team permissions matrix: sticky person column, horizontal scroll across software */
-.matrix-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--r); background: var(--card); }
-.matrix-table { width: max-content; min-width: 100%; border-collapse: separate; border-spacing: 0; font-size: 14px; }
-.matrix-table th, .matrix-table td { padding: 8px 12px; border-bottom: 1px solid var(--line); border-right: 1px solid var(--line); vertical-align: middle; white-space: nowrap; }
-.matrix-table th:last-child, .matrix-table td:last-child { border-right: 0; }
-.matrix-table tr:last-child td { border-bottom: 0; }
-.matrix-table thead th { background: var(--soft); color: var(--ink); font-weight: 600; text-align: center; }
-.matrix-table .sticky { position: sticky; left: 0; z-index: 2; background: var(--card); text-align: left; min-width: 168px; border-right: 2px solid var(--line); }
-.matrix-table thead .sticky { background: var(--soft); z-index: 3; }
-.matrix-table .who-link { font-weight: 600; color: var(--ink); text-decoration: none; display: block; }
-.matrix-table .who-link:hover { color: var(--accent); }
-.matrix-table .who-meta { font-size: 12px; color: var(--muted); display: flex; gap: 8px; align-items: center; margin-top: 4px; }
-.lvl-pick { width: auto; min-width: 84px; padding: 4px 8px; font-size: 13px; border-radius: var(--r); cursor: pointer; }
-.lvl-pick.lv-none { color: var(--muted); background: var(--bg); }
-.lvl-pick.lv-read { color: var(--ink); border-color: var(--accent); }
-.lvl-pick.lv-ask { color: var(--warn); border-color: var(--warn); }
-.lvl-pick.lv-write { color: var(--ok); border-color: var(--ok); font-weight: 600; }
+.perm-table thead th { font-weight: 600; color: var(--ink); background: var(--soft); }
+.perm-table th[scope=row] { text-align: left; font-weight: 400; }
+.perm-table .lvl-cell { text-align: center; width: 72px; }
+.perm-table input[type=radio] { width: 20px; height: 20px; margin: 0; accent-color: var(--accent); cursor: pointer; }
+.perm-table tbody tr:hover { background: var(--soft); }
 @media (max-width: 620px) {
   .perm-grid { grid-template-columns: minmax(0, 1fr); }
   .team-table .hide-sm { display: none; }
-  .perm-table, .perm-table tbody, .perm-table tr, .perm-table td { display: block; width: 100%; }
-  .perm-table thead { display: none; }
-  .perm-table tr { padding: 12px; border-bottom: 1px solid var(--line); }
-  .perm-table tr:last-child { border-bottom: 0; }
-  .perm-table td { padding: 0; border: 0; }
-  .perm-table .lvl-cell { text-align: left; margin-top: 8px; }
-  .perm-seg { display: flex; width: 100%; }
-  .perm-seg button { flex: 1; padding: 8px 4px; text-align: center; }
+  .perm-table th, .perm-table td { padding: 12px 8px; }
+  .perm-table .lvl-cell { width: 48px; font-size: 13px; }
+  .perm-table .svc-desc { display: none; }
 }
